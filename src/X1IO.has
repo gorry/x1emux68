@@ -249,6 +249,8 @@ LPIFM2:
 	addq.b	#1,d0
 	bne	LPIFM2
 
+	move.l	#$FFFFFFFF,F_PSG			* ＰＳＧの音色を入れ直す
+
 	move.l	(sp)+,d0
 	rts
 
@@ -380,6 +382,8 @@ OPMADR:
 	rts				* 16
 OPMDAT:
 	move.b	$0700(a1),d0		* 12
+	tst.b	(F_OPMSW)		* 16		* $FF = ON / $01 = MIX
+	bpl.w	OPMMIX			* 12(10)
 
 	cmpi.b	#$14,d0			*  8
 	bcs.s	ST_DAT			*  8(10)
@@ -428,6 +432,28 @@ ST_LFO:
 ST_TIM:
 	andi.b	#%11110011,d1		*  8
 	bra.s	ST_DAT			* 10
+
+OPMMIX:							* OPM=MIX : ch5-8 はＰＳＧが使う
+	cmpi.b	#$08,d0			*  8		* KON
+	beq.s	MIXKON			*  8(10)
+	cmpi.b	#$0F,d0			*  8		* NE/NFRQ (ノイズは ch8)
+	beq.s	MIXRT			*  8(10)
+	cmpi.b	#$20,d0			*  8
+	bcs.s	MIXGLB			*  8(10)
+	btst	#2,d0			* 10		* $20-$FF : bit2-0 = チャンネル
+	bne.s	MIXRT			*  8(10)
+	bra.w	ST_DAT			* 10
+MIXKON:
+	btst	#2,d1			* 10		* bit2-0 = チャンネル
+	bne.s	MIXRT			*  8(10)
+	bra.w	ST_DAT			* 10
+MIXGLB:
+	cmpi.b	#$1B,d0			*  8
+	beq.w	ST_LFO			* 12(10)
+	cmpi.b	#$14,d0			*  8
+	beq.w	ST_TIM			* 12(10)
+	bra.w	ST_DAT			* 10
+MIXRT:	rts				* 16
 
 
 *---------------------------------------*

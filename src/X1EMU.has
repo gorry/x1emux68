@@ -735,6 +735,14 @@ CNFPSG:
 	rts
 
 CNFOPM:
+	move.l	a2,-(sp)
+	lea	CHRMIX,a0
+	jsr	CMATCH
+	movea.l	(sp)+,a2
+	bne.s	CNFOP1
+	move.b	#$01,F_OPMSW		* MIX : ch1-4 = ‚e‚l‰¹Œ¹ / ch5-8 = ‚o‚r‚f
+	rts
+CNFOP1:
 	lea	CHRON,a0
 	jsr	CMATCH
 	seq	F_OPMSW
@@ -753,6 +761,7 @@ F_OPMSW::	dc.b	0
 FNCFDF:	dc.b	'CONFIG.X1',0
 CHRON:	dc.b	'ON',0
 CHROFF:	dc.b	'OFF',0
+CHRMIX:	dc.b	'MIX',0
 	.even
 CHRCNF:
 	dc.l	CNFFD0
@@ -780,7 +789,7 @@ CHRCNF:
 	dc.l	CNFPSG
 	dc.b		'PSG',0,0,$FF		* OFF / ON
 	dc.l	CNFOPM
-	dc.b		'OPM',0,0,$FF		* OFF / ON
+	dc.b		'OPM',0,0,$FF		* OFF / ON / MIX
 	dc.l	CNFCNF
 	dc.b		'CONFIG',0,$FF
 	dc.l	0
