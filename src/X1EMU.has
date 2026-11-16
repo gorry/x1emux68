@@ -35,6 +35,7 @@
 	.xref	A_IOB
 	.xref	END
 	.xref	D88CHK,D88RREC,D88TYPE
+	.xref	FDINIT,FDSET0,FDNAME,FDCHG
 
 	.xref	Z80DebuggerActive
 	.xref	InitZ80Debugger
@@ -95,8 +96,11 @@ l1:
 START:
 	jsr	SETBLOCK
 	jsr	TITLE
+	jsr	FDINIT
 	jsr	SWITCH
 	jsr	CONFIG
+	jsr	FDSET0
+	jsr	FDCHK
 	jsr	LDROM
 
 	jsr	SUPER
@@ -524,13 +528,42 @@ RTCNF2:	rts
 CNFANA:
 	lea	B_CNF+2,a2
 	cmpi.b	#':',(a2)
-	beq.s	RTCFAN
+	beq.w	RTCFAN
 LPCFA1:	move.b	(a2)+,d0
 	beq.s	BRCFAN
 	cmpi.b	#$1A,d0
 	bne.s	LPCFA1
 	clr.b	-(a2)
 BRCFAN:
+	lea	B_CNF+2,a2			* FD{1-9}{0-3} = 入れ替え用のディスクイメージ
+	jsr	SKIPSP
+	lea	CHRFD,a0
+	jsr	CMATCH
+	bne.s	CNFTBL
+	move.b	(a2)+,d1
+	subi.b	#'1',d1
+	cmpi.b	#8,d1
+	bhi.s	CNFTBL
+	move.b	(a2)+,d0
+	subi.b	#'0',d0
+	cmpi.b	#3,d0
+	bhi.s	CNFTBL
+	ext.w	d1
+	addq.w	#1,d1				* d1 = 組 (1-9)
+	lsl.w	#2,d1
+	ext.w	d0
+	add.w	d0,d1				* + ドライブNo.
+	lsl.w	#7,d1
+	lea	FDNAME,a0
+	adda.w	d1,a0
+	jsr	SKIPSP
+	beq.w	ERCNF
+	cmpi.b	#'=',(a2)+
+	bne.w	ERCNF
+	jsr	SKIPSP
+	beq.w	ERCNF
+	jmp	COPYFN2
+CNFTBL:
 	lea	CHRCNF,a0
 LPCFA2:	movea.l	(a0)+,a1
 	lea	B_CNF+2,a2
@@ -795,6 +828,10 @@ CHRCNF:
 	dc.l	0
 
 MSERCF:	dc.b	'CONFIGファイルに誤りがあります',$0D,$0A,0
+MSFDID:	dc.b	'FD',0,0,0
+MSFDEQ:	dc.b	'=',0
+MSFDNG:	dc.b	' が開けません',$0D,$0A,0
+MSFDKY:	dc.b	'何かキーを押すと続行します',$0D,$0A,0
 MSEREM:	dc.b	'EMM用のメモリが確保できません',$0D,$0A,0
 MSERRM:	dc.b	'BASIC ROM用のメモリが確保できません',$0D,$0A,0
 
@@ -802,6 +839,63 @@ B_CNF:	dc.b	$80
 	ds.b	1
 	ds.b	$80+1
 	.text
+
+
+*---------------------------------------*
+*  ディスクイメージが開けるか確かめる	*
+*---------------------------------------*
+*	FD0-FD3,FD10-FD93 に指定されたファイルを一度ずつ開く
+*	開けないものがあれば、名前を表示してキー入力を待つ
+
+FDCHK:
+	movem.l	d0-d3/a0-a1,-(sp)
+	lea	FDNAME,a1
+	moveq	#0,d2				* d2 = 組*4+ドライブNo.
+	moveq	#0,d3				* d3 = 開けなかった数
+FDCK1:	tst.b	(a1)
+	beq.s	FDCK4
+	clr.w	-(sp)				* MODE = 読み込みモード
+	pea	(a1)
+	dc.w	$FF3D					* DOS _OPEN
+	addq.l	#6,sp
+	tst.l	d0
+	bmi.s	FDCK2
+	move.w	d0,-(sp)
+	dc.w	$FF3E					* DOS _CLOSE
+	addq.l	#2,sp
+	bra.s	FDCK4
+FDCK2:	addq.w	#1,d3
+	lea	MSFDID+2,a0			* 'FDn' / 'FDnn'
+	move.w	d2,d0
+	lsr.w	#2,d0				* 組
+	beq.s	FDCK3
+	addi.b	#'0',d0
+	move.b	d0,(a0)+
+FDCK3:	moveq	#3,d0
+	and.w	d2,d0				* ドライブNo.
+	addi.b	#'0',d0
+	move.b	d0,(a0)+
+	clr.b	(a0)
+	lea	MSFDID,a0
+	jsr	PRINT
+	lea	MSFDEQ,a0
+	jsr	PRINT
+	lea	(a1),a0
+	jsr	PRINT
+	lea	MSFDNG,a0
+	jsr	PRINT
+FDCK4:	lea	$80(a1),a1
+	addq.w	#1,d2
+	cmpi.w	#10*4,d2
+	bcs.s	FDCK1
+
+	tst.w	d3
+	beq.s	FDCK5
+	lea	MSFDKY,a0
+	jsr	PRINT
+	dc.w	$FF08					* DOS _GETC
+FDCK5:	movem.l	(sp)+,d0-d3/a0-a1
+	rts
 
 
 *---------------------------------------*
@@ -1685,6 +1779,7 @@ LEDMOD:	clr.b	d1			*  4
 
 ONK73:							* OPT.2
 	st	F_SIFT+3-D_KEY(a0)	* 16
+	sf	F_FDK-D_KEY(a0)		* 16
 	bra.w	RETNOI			* 10
 ONK72:							* OPT.1(GRAPH)
 	st	F_SIFT+2-D_KEY(a0)	* 16
@@ -1721,7 +1816,7 @@ OFK70:							* SHIFT
 
 RETTVK:
 	tst.b	F_SIFT+3-D_KEY(a0)	* 12		* OPT.2+
-	bne.w	RETNOI			* 12(10)
+	bne.s	FDCHGK			*  8(10)
 	tst.b	F_SIFT+0-D_KEY(a0)	* 12		* SHIFT+
 	bne.w	RETNOI			* 12(10)
 
@@ -1730,11 +1825,35 @@ RETTVK:
 
 RETOFT:
 	tst.b	F_SIFT+3-D_KEY(a0)	* 12		* OPT.2+
-	bne.w	RETNOI			* 12(10)
+	bne.s	FDCHGO			*  8(10)
 	tst.b	F_SIFT+0-D_KEY(a0)	* 12		* SHIFT+
 	bne.w	RETNOI			* 12(10)
 
 	bra.w	RETOFI			* 10
+
+FDCHGO:
+	sf	F_FDK-D_KEY(a0)		* 16
+	bra.w	RETNOI			* 10
+
+FDCHGK:							* OPT.2+テンキー 0-3 : ディスクイメージの入れ替え
+	cmp.b	F_FDK-D_KEY(a0),d0	* 12		* キーリピートは無視
+	beq.w	RETNOI			* 12(10)
+	move.b	d0,F_FDK-D_KEY(a0)	* 12
+	moveq	#0,d1			*  4
+	cmpi.b	#$4F,d0			*  8		* テンキー 0
+	beq.s	FDCHGS			*  8(10)
+	moveq	#1,d1			*  4
+	cmpi.b	#$4B,d0			*  8		* テンキー 1
+	beq.s	FDCHGS			*  8(10)
+	moveq	#2,d1			*  4
+	cmpi.b	#$4C,d0			*  8		* テンキー 2
+	beq.s	FDCHGS			*  8(10)
+	moveq	#3,d1			*  4
+	cmpi.b	#$4D,d0			*  8		* テンキー 3
+	bne.w	RETNOI			* 12(10)
+FDCHGS:	lea	FDCHG,a0		* 12
+	st	(a0,d1.w)		* 18
+	bra.w	RETNOI			* 10
 
 
 V_KEY:	dc.b	0
@@ -1743,6 +1862,7 @@ D_KEY:	dc.b	0
 F_REPT:	dc.b	0
 F_SIFT:	dc.b	0,0,0,0
 F_LOCK:	dc.b	0,0
+F_FDK:	dc.b	0			* OPT.2 と一緒に押されているキー
 	.even
 
 RETINTA	reg	.loww.(RETINT-D_KEY)

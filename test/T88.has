@@ -6,6 +6,7 @@
 	.xdef	CDRIVE,TRACK,HEAD,FILENO,SCAD
 	.xdef	P_DISK,B_DISK
 	.xdef	A_RDAT,A_WDAT,E_RDST
+	.xdef	FD0
 
 	.xref	D88INIT,D88OPEN,D88CHK,D88RREC
 	.xref	D88RD,D88RA,D88WC,D88WR
@@ -213,5 +214,6 @@ CMD:	ds.b	8
 RES:	ds.b	16
 B_DISK:	ds.b	$1900
 IOB:	ds.b	$1000
+FD0:	ds.b	$80*4
 
 	.end	START

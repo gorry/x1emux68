@@ -1,6 +1,8 @@
 * X1IO.has FDC port test harness (run68)
 * T.CMD (8 bytes/record: op,port,value,0,count.w,0,0) -> T.OUT
 *   op 0: OUT port,value   op 1: IN port x count   op 2: OUT port,value+i x count
+* with -s FDSW=1 (new X1IO + X1D88 only):
+*   op 3: FDNAME[value] = 'S',('A'+value),'.IMG'   op 4: FDCHG[port] = $FF   op 5: FDSET0
 
 	.cpu	68000
 
@@ -10,6 +12,9 @@
 	.xdef	TXTY,X1MODE
 
 	.xref	I0F00,O0F00,A_IOB,FD0
+ if FDSW
+	.xref	FDINIT,FDSET0,FDNAME,FDCHG
+ endif
 
 	.text
 START:
@@ -17,6 +22,9 @@ START:
 	lea	FD0,a1
 LPNM:	move.b	(a0)+,(a1)+
 	bne.s	LPNM
+ if FDSW
+	jsr	FDINIT
+ endif
 
 	clr.w	-(sp)
 	pea	NCMD
@@ -40,9 +48,44 @@ LOOP:
 	move.w	CMD+4,CNT
 	clr.w	IDX
 	tst.b	CMD
-	beq.s	DO_OUT
+	beq	DO_OUT
 	cmpi.b	#1,CMD
-	beq.s	IN_L
+	beq	IN_L
+ if FDSW
+	cmpi.b	#3,CMD
+	beq.s	DO_NAME
+	cmpi.b	#4,CMD
+	beq.s	DO_CHG
+	cmpi.b	#5,CMD
+	beq.s	DO_SET0
+	bra.s	OS_L
+
+DO_NAME:
+	moveq	#0,d0
+	move.b	CMD+2,d0
+	move.w	d0,d1
+	lsl.w	#7,d1
+	lea	FDNAME,a0
+	adda.w	d1,a0
+	move.b	#'S',(a0)+
+	addi.b	#'A',d0
+	move.b	d0,(a0)+
+	move.b	#'.',(a0)+
+	move.b	#'I',(a0)+
+	move.b	#'M',(a0)+
+	move.b	#'G',(a0)+
+	clr.b	(a0)+
+	bra	LOOP
+DO_CHG:
+	moveq	#0,d0
+	move.b	CMD+1,d0
+	lea	FDCHG,a0
+	st	(a0,d0.w)
+	bra	LOOP
+DO_SET0:
+	jsr	FDSET0
+	bra	LOOP
+ endif
 
 OS_L:	move.w	IDX,d0
 	cmp.w	CNT,d0

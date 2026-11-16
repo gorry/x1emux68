@@ -37,6 +37,7 @@
 
 	.xref	D88INIT,D88OPEN
 	.xref	D88RD,D88RA,D88WC,D88WR
+	.xref	FDCHG,FDSWAP
 
 	.xref	A_BAS
 	.xref	T_OPC,T_ROM
@@ -1029,7 +1030,9 @@ OTNODR:
 
 
 O0FF8:							* コマンドレジスタ
-	ror.b	#2,d1				* 10
+	tst.l	(FDCHG)				* 20		* ディスクイメージの入れ替え
+	bne.w	FDCHGX				* 12(10)
+O0FF8A:	ror.b	#2,d1				* 10
 	moveq	#%00111100,d0			*  4
 	and.w	d1,d0				*  4
 	jmp	T_FDC(pc,d0.w)			* 14
@@ -1362,6 +1365,17 @@ FORCEINT:
 	move.w	#-1,P_DISK-A_MEM(aME)		* 16		* P_DISK = -1
 	move.b	#%00000000,$0FF8(a1)		* 16
 	rts					* 16
+
+FDCHGX:							* ディスクイメージの入れ替え
+	move.w	d1,-(sp)			*  8
+	jsr	FDSWAP				* 20
+	beq.s	FDCHG1				*  8(10)
+	lea	CDRIVE-A_MEM(aME),a0		*  8		* 開いていたファイルを開き直す
+	move.w	(a0),d1				*  8
+	bsr.w	MOTORON				* 18
+FDCHG1:	move.w	(sp)+,d1			*  8
+	moveq	#0,d0				*  4
+	bra.w	O0FF8A				* 10
 
 
 	.data

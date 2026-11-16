@@ -23,6 +23,15 @@ class Script:
     def outs(self, port, v, n):
         self.c.append(struct.pack(">BBBBHH", 2, port, v & 255, 0, n, 0))
 
+    def name(self, slot):
+        self.c.append(struct.pack(">BBBBHH", 3, 0, slot, 0, 0, 0))
+
+    def chg(self, drive):
+        self.c.append(struct.pack(">BBBBHH", 4, drive, 0, 0, 0, 0))
+
+    def set0(self):
+        self.c.append(struct.pack(">BBBBHH", 5, 0, 0, 0, 0, 0))
+
     def inp(self, port, n=1, tag=""):
         self.c.append(struct.pack(">BBBBHH", 1, port, 0, 0, n, 0))
         self.reads.append((tag, n))
@@ -177,5 +186,30 @@ for (r, n, dl, st, z) in trk:
 pat = lambda f, n: bytes((f + i) & 255 for i in range(n))
 check("odd w1", r4["w1 st0"] == [b"\x03"] and r4["w1 st1"] == [b"\x00"] and r4["w1 reread data"][0] == pat(0x21, 512), (r4["w1 st0"], r4["w1 st1"]))
 check("odd w4", r4["w4 reread data"][0] == pat(0x22, 256) and r4["w4 reread st1"] == [b"\x00"], r4["w4 reread st1"])
+
+# ---- 5. ディスクイメージの入れ替え (ドライブ0: 組0=T.IMG(D88) 組2=SI.IMG(2D) 組5=SU.IMG(D88) / ドライブ1: 組0だけ)
+rawB = bytes(random.randrange(256) for _ in range(327680))
+open("T.2D", "wb").write(bytes(x ^ 0x5A for x in raw))
+subprocess.run([sys.executable, D88MAKE, "-i", "T.2D", "SU.IMG"], check=True, capture_output=True)
+open("SI.IMG", "wb").write(rawB)
+rawC = bytes(x ^ 0x5A for x in raw)
+want = lambda img, c, h, r: img[c * 0x2000 + h * 0x1000 + (r - 1) * 0x100:][:256]
+s = Script(); s.set0(); s.name(2 * 4 + 0); s.name(5 * 4 + 0)
+s.select(1); s.seek(3); s.read(2, tag="p0")                       # 組0
+s.chg(0); s.read(2, tag="p1")                                     # 組2 (モーターONのまま)
+s.write(9, 0x44, tag="w"); s.read(9, tag="p1w")
+s.chg(0); s.select(1, motor=0); s.select(1); s.seek(3); s.read(2, tag="p2")   # 組5 (モーターOFFの間に)
+s.chg(0); s.read(2, tag="p3")                                     # 組0 に戻る
+s.chg(1); s.read(2, tag="p4")                                     # ドライブ1は組0だけ: 変わらない
+s.chg(0); s.chg(0); s.read(2, tag="p5")                           # 要求は1回分: 組2
+s.read(9, tag="p5w")
+r5, w5, f5 = run("T2N.x", d88, s)
+exp = {"p0": raw, "p1": rawB, "p2": rawC, "p3": raw, "p4": raw, "p5": rawB}
+for k, img in exp.items():
+    check("swap " + k, r5[k + " st0"] == [bytes([3])] and r5[k + " data"][0] == want(img, 3, 1, 2), (k, r5[k + " st0"]))
+patw = bytes((0x44 + i) & 255 for i in range(256))
+after = open("SI.IMG", "rb").read()
+check("swap write", r5["p1w data"][0] == patw and r5["p5w data"][0] == patw and want(after, 3, 1, 9) == patw
+      and f5 == d88 and open("SU.IMG", "rb").read()[0x2B0:0x2C0] is not None)
 
 print("FAILS", fails)
