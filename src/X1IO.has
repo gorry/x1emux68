@@ -3792,10 +3792,10 @@ RETO:
 *	move.b	d1,(a1,BC.w)		* 14
 	rts				* 16
 
-RETIA	reg	.loww.(RETI-A_BAS).w
-RETINA	reg	.loww.(RETIN-A_BAS).w
-RETITA	reg	.loww.(RETIT-A_BAS).w
-RETOA	reg	.loww.(RETO-A_BAS).w
+RETIA	reg	.loww.(RETI-A_BAS)
+RETINA	reg	.loww.(RETIN-A_BAS)
+RETITA	reg	.loww.(RETIT-A_BAS)
+RETOA	reg	.loww.(RETO-A_BAS)
 
 *---------------------------------------*
 *	 ÇhÇmÇoÅ@ÅïÅ@ÇîÇÅÇÇÇåÇÖ		*

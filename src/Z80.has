@@ -4124,10 +4124,10 @@ A_NX2y:	swap	XY			*  4
 	jmp	(aBS,d0.w)		* 14
 
 
-NEXTA	reg	.loww.(A_NX-A_BAS).w
-NEXT2A	reg	.loww.(A_NX2-A_BAS).w
-NEXTAy	reg	.loww.(A_NXy-A_BAS).w
-NEXT2Ay	reg	.loww.(A_NX2y-A_BAS).w
+NEXTA	reg	.loww.(A_NX-A_BAS)
+NEXT2A	reg	.loww.(A_NX2-A_BAS)
+NEXTAy	reg	.loww.(A_NXy-A_BAS)
+NEXT2Ay	reg	.loww.(A_NX2y-A_BAS)
 
 
 *---------------------------------------*
@@ -5820,7 +5820,7 @@ endif
 				if F_ROM=0
 T_NEI:	dcb.w	$100,.loww.(NEI-A_BAS)
 
-T_INT:	ds.w	$100,0
+T_INT:	dcb.w	$100,0
 
 T_NMI:	dcb.w	     $75,.loww.(NMI-A_BAS)
 	dcb.w	     $01,.loww.(NMI_76-A_BAS)

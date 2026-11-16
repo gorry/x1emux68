@@ -1736,11 +1736,11 @@ F_SIFT:	dc.b	0,0,0,0
 F_LOCK:	dc.b	0,0
 	.even
 
-RETINTA	reg	.loww.(RETINT-D_KEY).w
-RETTVKA	reg	.loww.(RETTVK-D_KEY).w
-RETNOIA	reg	.loww.(RETNOI-D_KEY).w
-RETOFIA	reg	.loww.(RETOFI-D_KEY).w
-RETOFTA	reg	.loww.(RETOFT-D_KEY).w
+RETINTA	reg	.loww.(RETINT-D_KEY)
+RETTVKA	reg	.loww.(RETTVK-D_KEY)
+RETNOIA	reg	.loww.(RETNOI-D_KEY)
+RETOFIA	reg	.loww.(RETOFI-D_KEY)
+RETOFTA	reg	.loww.(RETOFT-D_KEY)
 
 T_KEY:
 	dcb.w	1-$00+$00,RETNOIA
