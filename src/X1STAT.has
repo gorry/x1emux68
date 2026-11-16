@@ -1,0 +1,442 @@
+*************************************************
+*						*
+*    ステータス行 for Ｘ１エミュレータ		*
+*						*
+*************************************************
+
+	.cpu	68000
+
+*	Ｘ１の画面の上に１行 (8ライン) のステータス行を出す
+*
+*	ドライブごとに20桁 :  [LED] n : ファイル名(16桁)
+*
+*	X68000のテキスト画面 (Ｘ１のグラフィックを出している画面) の、
+*	各ページ (SCREEN 0/1) の先頭の直前の8ラインに描く
+*	この8ラインはプレーン3を0にして、テキストパレットの3-7で出す
+*	(Ｘ１のグラフィックは、プレーン3を1にしてパレットの8-15で出している)
+*
+*	Ｘ１のグラフィックの処理がテキスト画面の同時アクセスを有効にした
+*	ままにするので、描く間だけ CRTC R21 を 0 にする
+*
+*	色 3 : 文字 (コンソールの白をそのまま使う)
+*	   4 : 背景 (暗いグレー)
+*	   5 : LED 消灯 (黒)
+*	   6 : LED リード (緑)
+*	   7 : LED ライト (赤)
+*
+*	このモジュールはリンクの先頭に置く。.data と .bss は使わない
+*	(A_BAS,A_MEM からの16ビット相対に影響しないようにする)
+
+	.xdef	STINIT,STHIDE,STEXIT,STNAME
+	.xdef	STLEDR,STLEDW
+	.xdef	STVDISP
+	.xdef	STSET,STSCR0,STSCR1
+
+	.xref	FD0,CGROM
+	.xref	CDRIVE
+	.xref	FLASH
+	.xref	F_DISP
+	.xref	FDCHG,FDSET,FDNEXT
+
+GVRAM	equ	$C00000			* グラフィックVRAM (1ドット = 1ワード)
+TVRAM	equ	$E00000			* テキストVRAM (プレーン0)
+TXTPAL	equ	$E82200			* テキストパレット
+CRTC06	equ	$E8000C			* CRTC R06 (垂直表示期間の開始)
+CRTC07	equ	$E8000E			* CRTC R07 (垂直表示期間の終了)
+CRTC21	equ	$E8002A			* CRTC R21 (テキスト画面の同時アクセス)
+GLINE	equ	2048			* グラフィックVRAMの1ラインのバイト数
+TLINE	equ	128			* テキストVRAMの1ラインのバイト数
+TPLANE	equ	$20000			* テキストVRAMの1プレーンのバイト数
+
+STY0	equ	504			* ステータス行のライン (SCREEN 0 の上)
+STY1	equ	760			* ステータス行のライン (SCREEN 1 の上)
+
+STCOLS	equ	20			* ドライブ1つ分の桁数
+STNLEN	equ	16			* ファイル名の桁数
+
+C_LOFF	equ	5			* LEDの色 (消灯)
+C_READ	equ	6			* LEDの色 (リード)
+C_WRIT	equ	7			* LEDの色 (ライト)
+LEDPAT	equ	%01111110		* LEDの形 (1-6ライン目に描く)
+
+		*	  G     R     B   I
+P_BACK	equ	%01000_01000_01000_0	* 背景 (#444)
+P_LOFF	equ	%00000_00001_00000_0	* LED 消灯 (0 は透明になるので避ける)
+P_READ	equ	%11111_00000_00000_0	* LED リード
+P_WRIT	equ	%00000_11111_00000_0	* LED ライト
+
+LEDTIME	equ	8			* LEDを点けておく時間 (垂直同期の回数)
+FLTIME	equ	$1C			* CFLASH の周期 (垂直同期の回数)
+
+
+	.text
+
+*---------------------------------------*
+*    表示する / しないの切り替え	*
+*---------------------------------------*
+*	CONFIG の STATUS= から呼ぶ (画面モードを設定する前)
+*	in	d0.b = $FF : 表示する / $00 : 表示しない
+
+STSET:
+	move.b	d0,STSW
+	beq.s	STS_1
+	move.w	#$0200-8,STSCR0			* ステータス行の分だけ上から
+	move.w	#$0300-8,STSCR1
+	rts
+STS_1:	move.w	#$0200,STSCR0
+	move.w	#$0300,STSCR1
+	rts
+
+
+*---------------------------------------*
+*	ステータス行を描き直す		*
+*---------------------------------------*
+*	画面モードを設定したあとと、デバッガから戻るときに呼ぶ
+*	(CRTC にＸ１の画面の値を書いたあと)
+
+STINIT:
+	tst.b	STSW
+	bne.s	STI_0
+	rts
+STI_0:	movem.l	d0-d2/a0-a1,-(sp)
+	move.w	CRTC21,-(sp)
+	clr.w	CRTC21
+
+	cmpi.b	#1,F_DISP			* 表示期間を縦 416 ラスタにする
+	bne.s	STI_3
+	move.w	#23,CRTC06			* 24kHz : 上下に 8 ラスタずつ
+	move.w	#439,CRTC07
+	bra.s	STI_4
+STI_3:	move.w	#24,CRTC06			* 31kHz : 上に 16 ラスタ
+STI_4:
+
+	lea	TXTPAL+4*2,a0			* テキストパレット 4-7
+	tst.b	PALFLG
+	bne.s	STI_1
+	st	PALFLG
+	lea	PALSAV(pc),a1			* 元の値を覚える
+	move.l	(a0),(a1)+
+	move.l	4(a0),(a1)
+STI_1:	move.w	#P_BACK,(a0)+
+	move.w	#P_LOFF,(a0)+
+	move.w	#P_READ,(a0)+
+	move.w	#P_WRIT,(a0)+
+
+	lea	GVRAM+STY0*GLINE,a0		* グラフィック画面の同じラインは空にする
+	bsr	STGCLR
+	lea	GVRAM+STY1*GLINE,a0
+	bsr	STGCLR
+
+	lea	TVRAM+STY0*TLINE,a0		* 背景
+	bsr	STBACK
+	lea	TVRAM+STY1*TLINE,a0
+	bsr	STBACK
+
+	lea	LEDCUR(pc),a0
+	clr.l	(a0)
+	moveq	#4-1,d2
+STI_2:	moveq	#0,d0
+	bsr	STLED
+	dbf	d2,STI_2
+	bsr	STNAME
+	move.w	(sp)+,CRTC21
+	movem.l	(sp)+,d0-d2/a0-a1
+	rts
+
+
+*	SCREEN 0 の上のステータス行を消す
+*	(デバッガの画面に入るときに呼ぶ。デバッガの画面の最後の8ラインに重なる)
+
+STHIDE:
+	tst.b	STSW
+	bne.s	STH_0
+	rts
+STH_0:	movem.l	d1/a0,-(sp)
+	move.w	CRTC21,-(sp)
+	clr.w	CRTC21
+	lea	TVRAM+STY0*TLINE,a0
+	moveq	#0,d1
+	bsr	STFILL
+	bsr	STFILL
+	bsr	STFILL
+	bsr	STFILL
+	move.w	(sp)+,CRTC21
+	movem.l	(sp)+,d1/a0
+	rts
+
+
+*	終了するとき : SCREEN 0 の上を消して、テキストパレットを戻す
+
+STEXIT:
+	move.l	a0,-(sp)
+	tst.b	PALFLG
+	beq.s	STE_1
+	bsr	STHIDE
+	lea	TXTPAL+4*2,a0
+	move.l	PALSAV(pc),(a0)+
+	move.l	PALSAV+4(pc),(a0)
+STE_1:	movea.l	(sp)+,a0
+	rts
+
+
+*	a0 (プレーン0) からの8ラインを背景の色にする	(a0 破壊)
+
+STBACK:	move.l	d1,-(sp)
+	moveq	#0,d1
+	bsr	STFILL				* プレーン0 = 0
+	bsr	STFILL				* プレーン1 = 0
+	moveq	#-1,d1
+	bsr	STFILL				* プレーン2 = 1
+	moveq	#0,d1
+	bsr	STFILL				* プレーン3 = 0
+	move.l	(sp)+,d1
+	rts
+
+*	a0 からの8ラインを d1.l で埋めて、a0 を次のプレーンに進める
+
+STFILL:	movem.l	d0/a1,-(sp)
+	movea.l	a0,a1
+	move.w	#8*TLINE/4-1,d0
+STF_1:	move.l	d1,(a1)+
+	dbf	d0,STF_1
+	adda.l	#TPLANE,a0
+	movem.l	(sp)+,d0/a1
+	rts
+
+*	グラフィック画面の a0 からの8ラインを消す	(a0 破壊)
+
+STGCLR:	move.l	d0,-(sp)
+	move.w	#8*GLINE/4-1,d0
+STG_1:	clr.l	(a0)+
+	dbf	d0,STG_1
+	move.l	(sp)+,d0
+	rts
+
+
+*---------------------------------------*
+*	  ファイル名を描く		*
+*---------------------------------------*
+*	FD0-FD3 (今入っているイメージ) のファイル名を描く
+*	ディレクトリ名は出さない
+
+STNAME:
+	tst.b	STSW
+	bne.s	STN_0
+	rts
+STN_0:	movem.l	d0-d4/a0-a1,-(sp)
+	lea	PNDSHOW(pc),a0			* 要求が残っていたら描き直させる
+	clr.l	(a0)
+	move.w	CRTC21,-(sp)
+	clr.w	CRTC21
+	moveq	#0,d4				* d4 = ドライブNo.
+STN_1:	lea	FD0,a0
+	move.w	d4,d0
+	lsl.w	#7,d0
+	adda.w	d0,a0
+	bsr	STNAM1
+	addq.w	#1,d4
+	cmpi.w	#4,d4
+	bcs.s	STN_1
+	move.w	(sp)+,CRTC21
+	movem.l	(sp)+,d0-d4/a0-a1
+	rts
+
+
+*	ドライブ d4.w のところに、a0 のファイル名を描く
+
+STNAM1:
+	movem.l	d0/d2-d3/a0-a1,-(sp)
+	move.w	d4,d2
+	mulu	#STCOLS,d2
+	addq.w	#1,d2				* d2 = 桁 (LEDの次)
+	moveq	#'0',d0
+	add.b	d4,d0
+	bsr	STPUTC
+	moveq	#':',d0
+	bsr	STPUTC
+
+	movea.l	a0,a1				* a1 = ファイル名の本体
+STN_2:	move.b	(a0)+,d0
+	beq.s	STN_4
+	cmpi.b	#$5C,d0				* '\'
+	beq.s	STN_3
+	cmpi.b	#'/',d0
+	beq.s	STN_3
+	cmpi.b	#':',d0
+	bne.s	STN_2
+STN_3:	movea.l	a0,a1
+	bra.s	STN_2
+
+STN_4:	moveq	#STNLEN-1,d3
+STN_5:	move.b	(a1),d0
+	beq.s	STN_6
+	addq.l	#1,a1
+	bra.s	STN_7
+STN_6:	moveq	#' ',d0
+STN_7:	bsr	STPUTC
+	dbf	d3,STN_5
+	movem.l	(sp)+,d0/d2-d3/a0-a1
+	rts
+
+
+*	d0.b の文字を d2.w の桁に描いて、桁を進める
+*	文字のドットは色 3 (プレーン0,1 = 1 / プレーン2 = 0)、ほかは背景
+
+STPUTC:
+	movem.l	d0-d1/d3-d4/a0-a2,-(sp)
+	andi.w	#$00FF,d0
+	lsl.w	#3,d0
+	lea	CGROM,a2
+	adda.w	d0,a2				* a2 = フォント (8*8)
+	lea	TVRAM+STY0*TLINE,a1		* SCREEN 0 の上
+	adda.w	d2,a1
+	moveq	#2-1,d4
+STP_1:	movea.l	a2,a0
+	moveq	#8-1,d3
+STP_2:	move.b	(a0)+,d0
+	move.b	d0,d1
+	not.b	d1
+	move.b	d0,(a1)				* プレーン0
+	adda.l	#TPLANE,a1
+	move.b	d0,(a1)				* プレーン1
+	adda.l	#TPLANE,a1
+	move.b	d1,(a1)				* プレーン2
+	suba.l	#TPLANE*2-TLINE,a1
+	dbf	d3,STP_2
+	adda.l	#(STY1-STY0-8)*TLINE,a1		* SCREEN 1 の上
+	dbf	d4,STP_1
+	movem.l	(sp)+,d0-d1/d3-d4/a0-a2
+	addq.w	#1,d2
+	rts
+
+
+*---------------------------------------*
+*		ＬＥＤ			*
+*---------------------------------------*
+
+*	カレントドライブのLEDを点ける (ＦＤＣのコマンドから)
+*	実際に描くのは垂直同期の割り込み
+
+STLEDR:						* リード
+	movem.l	d0/a0,-(sp)
+	moveq	#C_READ,d0
+	bra.s	STL_1
+STLEDW:						* ライト
+	movem.l	d0/a0,-(sp)
+	moveq	#C_WRIT,d0
+STL_1:	lea	LEDWANT(pc),a0
+	move.l	d1,-(sp)
+	move.w	CDRIVE,d1
+	lsr.w	#2,d1
+	andi.w	#3,d1
+	move.b	d0,(a0,d1.w)
+	move.b	#LEDTIME,LEDTMR-LEDWANT(a0,d1.w)
+	move.l	(sp)+,d1
+	movem.l	(sp)+,d0/a0
+	rts
+
+
+*	垂直同期の割り込み
+*	LEDを描き、FLTIME 回に1回 CFLASH の処理へ行く
+*	入れ替えの要求 (FDCHG) の回数が変わったら、次に入るイメージのファイル名を先に描く
+*	(実際に入れ替わるのは、Ｘ１が次にＦＤＣへコマンドを書いたとき)
+
+STVDISP:
+	tst.b	STSW
+	beq.w	STV_5
+	movem.l	d0-d4/a0/a2,-(sp)
+	move.w	CRTC21,-(sp)
+	clr.w	CRTC21
+	moveq	#4-1,d2				* d2 = ドライブNo.
+STV_1:	lea	LEDTMR(pc),a0
+	tst.b	(a0,d2.w)
+	beq.s	STV_2
+	subq.b	#1,(a0,d2.w)
+	bne.s	STV_2
+	clr.b	LEDWANT-LEDTMR(a0,d2.w)		* 時間が過ぎたら消す
+STV_2:	move.b	LEDWANT-LEDTMR(a0,d2.w),d0
+	cmp.b	LEDCUR-LEDTMR(a0,d2.w),d0
+	beq.s	STV_3
+	move.b	d0,LEDCUR-LEDTMR(a0,d2.w)
+	bsr	STLED
+STV_3:	dbf	d2,STV_1
+
+	moveq	#4-1,d3				* d3 = ドライブNo.
+STV_6:	lea	FDCHG,a0
+	move.b	(a0,d3.w),d4			* d4 = 要求の回数
+	lea	PNDSHOW(pc),a0
+	cmp.b	(a0,d3.w),d4
+	beq.s	STV_8				* もう描いた
+	move.b	d4,(a0,d3.w)
+	beq.s	STV_8				* 要求がなくなった
+	lea	FDSET,a0
+	moveq	#0,d2
+	move.b	(a0,d3.w),d2			* d2 = 今の組
+STV_7:	jsr	FDNEXT				* a2 = 次の組のファイル名
+	beq.s	STV_8
+	move.w	d1,d2
+	subq.b	#1,d4
+	bne.s	STV_7
+	movea.l	a2,a0
+	move.w	d3,d4
+	bsr	STNAM1
+STV_8:	dbf	d3,STV_6
+
+	move.w	(sp)+,CRTC21
+	movem.l	(sp)+,d0-d4/a0/a2
+
+STV_5:	subq.b	#1,FLCNT
+	bne.s	STV_4
+	move.b	#FLTIME,FLCNT
+	jmp	FLASH
+STV_4:	rte
+
+
+*	ドライブ d2.w のLEDを d0.b の色で描く (0 = 消灯)
+
+STLED:
+	movem.l	d0-d1/d3-d4/a1,-(sp)
+	tst.b	d0
+	bne.s	STD_1
+	moveq	#C_LOFF,d0
+STD_1:	lsr.b	#1,d0
+	scs	d1
+	andi.b	#LEDPAT,d1			* d1 = プレーン0
+	lsr.b	#1,d0
+	scs	d0
+	andi.b	#LEDPAT,d0			* d0 = プレーン1
+	move.w	d2,d3
+	mulu	#STCOLS,d3
+	lea	TVRAM+(STY0+1)*TLINE,a1		* SCREEN 0 の上
+	adda.w	d3,a1
+	moveq	#2-1,d4
+STD_2:	moveq	#6-1,d3
+STD_3:	move.b	d1,(a1)				* プレーン0
+	adda.l	#TPLANE,a1
+	move.b	d0,(a1)				* プレーン1
+	suba.l	#TPLANE-TLINE,a1
+	dbf	d3,STD_3
+	adda.l	#(STY1-STY0-6)*TLINE,a1		* SCREEN 1 の上
+	dbf	d4,STD_2
+	movem.l	(sp)+,d0-d1/d3-d4/a1
+	rts
+
+
+*	ワーク (.text に置く)
+
+	.even
+LEDTMR:	dc.b	0,0,0,0			* 消すまでの残り時間
+LEDWANT:	dc.b	0,0,0,0		* 出したい色 (0 = 消灯)
+LEDCUR:	dc.b	0,0,0,0			* 今出している色
+PNDSHOW:	dc.b	0,0,0,0		* 次のファイル名を描いたときの要求の回数
+FLCNT:	dc.b	FLTIME			* CFLASH までの残り回数
+PALFLG:	dc.b	0			* テキストパレットを覚えたら $FF
+STSW:	dc.b	$FF			* $FF = 表示する / $00 = 表示しない
+	.even
+STSCR0:	dc.w	$0200-8			* SCREEN 0 のYスクロールの値
+STSCR1:	dc.w	$0300-8			* SCREEN 1 のYスクロールの値
+PALSAV:	dc.w	0,0,0,0			* テキストパレット 4-7 の元の値
+	.even
+
+	.end
+

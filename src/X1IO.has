@@ -38,6 +38,7 @@
 	.xref	D88INIT,D88OPEN
 	.xref	D88RD,D88RA,D88WC,D88WR
 	.xref	FDCHG,FDSWAP
+	.xref	STLEDR,STLEDW,STSCR0,STSCR1
 
 	.xref	A_BAS
 	.xref	T_OPC,T_ROM
@@ -1220,6 +1221,7 @@ READDATA:						* リードデータ
 	move.l	#$0100,-(sp)			* 20		* SIZE =  $100
 	move.w	#$FF00,(E_RDST)		* 20
 RDATA:
+	jsr	STLEDR				* 20		* ステータス行のLED
 	lea	CDRIVE-A_MEM(aME),a0		*  8
 	move.w	(a0),d1				*  8
 	jsr	D88RD				* 20		* D88形式なら読み込む
@@ -1302,6 +1304,7 @@ WDATA:
 	move.w	(a0),d1				*  8
 	move.b	FILENO+2-CDRIVE(a0,d1.w),d0	* 14
 	bne.s	WRITEP				*  8(10)
+	jsr	STLEDW				* 20		* ステータス行のLED
 	jsr	D88WC				* 20		* D88形式ならセクタを調べる
 	bne.s	WDD88				*  8(10)
 
@@ -1739,7 +1742,7 @@ A_SC1:	bne.s	W40SC1			*  8(10)
 	btst	#6,$1A02(a1)		* 16
 A_SC0:	bne.s	W40SC0			*  8(10)
 
-	move.w	#$0200,d0			* 8
+	move.w	(STSCR0),d0			* 16		* $0200 / ステータス行があれば $01F8
 	move.w	d0,(TXTY)			* 16
 	move.w	d0,PwSCTXTY			* 16
 	move.w	d0,PwSCGP0Y			* 16
@@ -1762,7 +1765,7 @@ RTCRTC:
 
 W403D0:	move.b	#%01,PsSYSPT2			* 20
 W40SC0:
-	move.w	#$0200,d0			* 8
+	move.w	(STSCR0),d0			* 16		* $0200 / ステータス行があれば $01F8
 	move.w	d0,(TXTY)			* 16
 	move.w	d0,PwSCTXTY			* 16
 	move.w	d0,PwSCGP0Y			* 16
@@ -1770,7 +1773,7 @@ W40SC0:
 
 W403D1:	move.b	#%10,PsSYSPT2			* 20
 W40SC1:
-	move.w	#$0300,d0			* 8
+	move.w	(STSCR1),d0			* 16		* $0300 / ステータス行があれば $02F8
 	move.w	d0,(TXTY)			* 16
 	move.w	d0,PwSCTXTY			* 16
 	move.w	d0,PwSCGP0Y			* 16

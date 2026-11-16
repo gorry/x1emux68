@@ -1,0 +1,280 @@
+* X1STAT.has test harness (run68)
+* X1STAT.has is assembled from a copy: GVRAM/TVRAM/TXTPAL/CRTC06/CRTC07/CRTC21 equ lines removed (xref instead),
+* and rte replaced by addq.l #2,sp / rts (run68 cannot execute rte)
+* T.FNT (2048 bytes) -> CGROM, T.NAM ($200 bytes) -> FD0-FD3, result -> T.OUT
+
+	.cpu	68000
+
+	.xdef	FD0,CGROM,CDRIVE,FLASH
+	.xdef	FDCHG,FDSET,FDNEXT
+	.xdef	GVRAM,TVRAM,TXTPAL,CRTC06,CRTC07,CRTC21,F_DISP
+	.xref	STINIT,STHIDE,STEXIT,STNAME,STLEDR,STLEDW,STVDISP
+	.xref	STSET,STSCR0,STSCR1
+
+DUMP	macro
+	bsr	DODUMP
+	endm
+
+VSYNC	macro	n
+	move.w	#n-1,d7
+	bsr	DOVSYNC
+	endm
+
+	.text
+START:
+	lea	NFNT,a0
+	lea	CGROM,a1
+	move.l	#$800,d1
+	bsr	LOAD
+	lea	NNAM,a0
+	lea	FD0,a1
+	move.l	#$200,d1
+	bsr	LOAD
+	move.w	#$20,-(sp)
+	pea	NOUT
+	dc.w	$FF3C
+	addq.l	#6,sp
+	move.w	d0,HOUT
+
+	lea	GVRAM+500*2048,a0		* garbage around the status rows
+	move.w	#16*2048/2-1,d0
+FILL1:	move.w	#$5555,(a0)+
+	dbf	d0,FILL1
+	lea	GVRAM+756*2048,a0
+	move.w	#16*2048/2-1,d0
+FILL2:	move.w	#$5555,(a0)+
+	dbf	d0,FILL2
+	lea	TVRAM+500*128,a0
+	bsr	FILLTX
+	lea	TVRAM+756*128,a0
+	bsr	FILLTX
+
+	lea	TXTPAL,a0
+	moveq	#16-1,d0
+	move.w	#$1000,d1
+FILL5:	move.w	d1,(a0)+
+	addq.w	#1,d1
+	dbf	d0,FILL5
+	move.w	#$0170,CRTC21			* simultaneous access left enabled
+	move.w	#31,CRTC06			* 24kHz table values
+	move.w	#431,CRTC07
+	move.b	#1,F_DISP
+
+	jsr	STINIT
+	DUMP					* 0: after init
+	move.w	#4,CDRIVE
+	jsr	STLEDR
+	DUMP					* 1: before vsync (nothing drawn yet)
+	VSYNC	1
+	DUMP					* 2: drive 1 green
+	VSYNC	6
+	move.w	#12,CDRIVE
+	jsr	STLEDW
+	VSYNC	1
+	DUMP					* 3: drive 1 off (8 vsyncs), drive 3 red
+	VSYNC	1
+	DUMP					* 4: drive 3 red
+	VSYNC	7
+	DUMP					* 5: all off (16 vsyncs)
+	move.w	#0,CDRIVE
+	jsr	STLEDW
+	VSYNC	1
+	jsr	STLEDR				* write then read: green
+	VSYNC	1
+	DUMP					* 6: drive 0 green (18 vsyncs)
+	lea	NEWNAM,a0			* swap name of drive 2
+	lea	FD0+$100,a1
+CPNM:	move.b	(a0)+,(a1)+
+	bne.s	CPNM
+	jsr	STNAME
+	DUMP					* 7: new name, LED kept
+	jsr	STHIDE
+	DUMP					* 8: page 0 row cleared
+	jsr	STINIT
+	jsr	STEXIT
+	DUMP					* 9: after exit (palette restored, page 0 row cleared)
+	move.w	#40,CRTC06			* 31kHz table values
+	move.w	#440,CRTC07
+	move.b	#2,F_DISP
+	jsr	STINIT
+	DUMP					* 10: 31kHz
+	jsr	STEXIT
+	moveq	#0,d0				* STATUS=OFF
+	jsr	STSET
+	move.w	#31,CRTC06
+	move.w	#431,CRTC07
+	move.b	#1,F_DISP
+	jsr	STINIT
+	jsr	STNAME
+	jsr	STLEDR
+	VSYNC	2
+	jsr	STHIDE
+	DUMP					* 11: off: nothing drawn, CRTC untouched
+	jsr	STEXIT
+	moveq	#-1,d0				* STATUS=ON
+	jsr	STSET
+	DUMP					* 12: on again (scroll values only)
+	jsr	STINIT
+	addq.b	#1,FDCHG+2			* swap request for drive 2
+	addq.b	#1,FDCHG+3			* drive 3: no other image
+	VSYNC	1
+	DUMP					* 13: next name of drive 2 shown (set 5)
+	addq.b	#1,FDCHG+2			* pressed again
+	VSYNC	1
+	DUMP					* 14: the name after that (set 7)
+	lea	FD0+$100,a1			* the real swap: name changes, request cleared
+	lea	PNDNM2,a0
+CPNM2:	move.b	(a0)+,(a1)+
+	bne.s	CPNM2
+	move.b	#7,FDSET+2
+	jsr	STNAME
+	clr.l	FDCHG
+	VSYNC	1
+	DUMP					* 15: after the swap
+	addq.b	#1,FDCHG+2			* one more request (same count as before the swap)
+	VSYNC	1
+	DUMP					* 16: back to set 0
+	VSYNC	36				* 60 vsyncs (including 2 with the status row off)
+	move.l	#4,-(sp)
+	pea	NFLASH
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	dc.w	$FF1F
+	dc.w	$FF00
+
+FILLTX:	moveq	#4-1,d1
+FILL3:	movea.l	a0,a1
+	move.w	#16*128-1,d0
+FILL4:	st	(a1)+
+	dbf	d0,FILL4
+	adda.l	#$20000,a0
+	dbf	d1,FILL3
+	rts
+
+LOAD:	clr.w	-(sp)
+	pea	(a0)
+	dc.w	$FF3D
+	addq.l	#6,sp
+	move.w	d0,d2
+	move.l	d1,-(sp)
+	pea	(a1)
+	move.w	d2,-(sp)
+	dc.w	$FF3F
+	lea	10(sp),sp
+	move.w	d2,-(sp)
+	dc.w	$FF3E
+	addq.l	#2,sp
+	rts
+
+DODUMP:	lea	GVRAM+500*2048,a0		* 16 lines around row 0
+	bsr	WR16
+	lea	GVRAM+756*2048,a0		* 16 lines around row 1
+	bsr	WR16
+	lea	TVRAM+500*128,a0		* 16 lines around row 0
+	bsr	WRTX
+	lea	TVRAM+756*128,a0		* 16 lines around row 1
+	bsr	WRTX
+	move.l	#38,-(sp)			* TXTPAL (32 bytes) + CRTC21,CRTC06,CRTC07
+	pea	TXTPAL
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	lea	SCRBUF,a0
+	move.w	STSCR0,(a0)+
+	move.w	STSCR1,(a0)+
+	move.l	#4,-(sp)
+	pea	SCRBUF
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	rts
+WRTX:	moveq	#4-1,d3
+DD1:	move.l	#16*128,-(sp)
+	pea	(a0)
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	adda.l	#$20000,a0
+	dbf	d3,DD1
+	rts
+WR16:	move.l	#16*2048,-(sp)
+	pea	(a0)
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	rts
+
+DOVSYNC:
+	move.l	#$11112222,d0
+	move.l	#$33334444,d1
+	move.l	#$55556666,d2
+	movea.l	#$77778888,a0
+	pea	VSRET
+	move.w	sr,-(sp)
+	jmp	STVDISP
+VSRET:	cmpi.l	#$11112222,d0
+	bne.s	BROKEN
+	cmpi.l	#$33334444,d1
+	bne.s	BROKEN
+	cmpi.l	#$55556666,d2
+	bne.s	BROKEN
+	cmpa.l	#$77778888,a0
+	bne.s	BROKEN
+	dbf	d7,DOVSYNC
+	rts
+BROKEN:	pea	MSBRK
+	dc.w	$FF09
+	dc.w	$FF00
+
+FDNEXT:	cmpi.w	#2,d3				* only drive 2 has other images: sets 0 -> 5 -> 7 -> 0
+	bne.s	FDNX1
+	lea	PNDNAM,a2
+	moveq	#5,d1
+	tst.w	d2
+	beq.s	FDNX2
+	lea	PNDNM2,a2
+	moveq	#7,d1
+	cmpi.w	#5,d2
+	beq.s	FDNX2
+	lea	ORGNAM,a2
+	moveq	#0,d1
+FDNX2:	moveq	#1,d0
+	rts
+FDNX1:	moveq	#0,d0
+	rts
+
+FLASH:	addq.l	#1,NFLASH
+	addq.l	#2,sp
+	rts
+
+	.data
+NFNT:	dc.b	'T.FNT',0
+NNAM:	dc.b	'T.NAM',0
+NOUT:	dc.b	'T.OUT',0
+NEWNAM:	dc.b	'D:\DIR\NEW.2D',0
+PNDNAM:	dc.b	'Z:\PEND.D88',0
+PNDNM2:	dc.b	'PEND2.D88',0
+ORGNAM:	dc.b	'ORIG.2D',0
+MSBRK:	dc.b	'REGISTER BROKEN',13,10,0
+	.even
+NFLASH:	dc.l	0
+CDRIVE:	dc.w	0
+FDCHG:	dc.l	0
+FDSET:	dc.l	0
+
+	.bss
+	.even
+HOUT:	ds.w	1
+FD0:	ds.b	$200
+CGROM:	ds.b	$800
+GVRAM:	ds.b	776*2048
+TVRAM:	ds.b	$20000*3+776*128
+TXTPAL:	ds.w	16
+CRTC21:	ds.w	1
+CRTC06:	ds.w	1
+CRTC07:	ds.w	1
+SCRBUF:	ds.w	2
+F_DISP:	ds.b	2
+
+	.end	START

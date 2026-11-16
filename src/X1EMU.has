@@ -36,6 +36,8 @@
 	.xref	END
 	.xref	D88CHK,D88RREC,D88TYPE
 	.xref	FDINIT,FDSET0,FDNAME,FDCHG
+	.xref	STINIT,STEXIT,STVDISP,STSET
+	.xdef	FLASH
 
 	.xref	Z80DebuggerActive
 	.xref	InitZ80Debugger
@@ -767,6 +769,12 @@ CNFPSG:
 	seq	F_PSGSW
 	rts
 
+CNFSTS:
+	lea	CHRON,a0
+	jsr	CMATCH
+	seq	d0
+	jmp	STSET
+
 CNFOPM:
 	move.l	a2,-(sp)
 	lea	CHRMIX,a0
@@ -823,6 +831,8 @@ CHRCNF:
 	dc.b		'PSG',0,0,$FF		* OFF / ON
 	dc.l	CNFOPM
 	dc.b		'OPM',0,0,$FF		* OFF / ON / MIX
+	dc.l	CNFSTS
+	dc.b		'STATUS',0,$FF		* OFF / ON
 	dc.l	CNFCNF
 	dc.b		'CONFIG',0,$FF
 	dc.l	0
@@ -957,9 +967,11 @@ LPCRT:	move.w	(a0)+,(a1)+
 	lea	PwTEXTP3,a0
 	move.l	#$FFFFFFFF,d0
 	jsr	S_TXT
+	jsr	STINIT					* ステータス行 (表示期間も広げる)
 	rts
 
 RETCRTC::
+	jsr	STEXIT					* ステータス行
 	move.l	a0,-(sp)
 	move.w	d1,-(sp)
 	move.l	d0,-(sp)
@@ -1190,8 +1202,8 @@ SETVECT::
 	lea	0,a1					* 割り込み禁止
 	trap	#15
 	moveq	#$6C,d0					* IOCS _VDISPST
-	lea	FLASH,a1
-	move.w	#$001C,d1				* CFLASH カウンタ
+	lea	STVDISP,a1				* LED の表示と CFLASH
+	move.w	#$0001,d1				* 毎回
 	trap	#15
 
 	moveq	#$6A,d0					* IOCS _OPMINTST
@@ -1852,7 +1864,7 @@ FDCHGK:							* OPT.2+テンキー 0-3 : ディスクイメージの入れ替え
 	cmpi.b	#$4D,d0			*  8		* テンキー 3
 	bne.w	RETNOI			* 12(10)
 FDCHGS:	lea	FDCHG,a0		* 12
-	st	(a0,d1.w)		* 18
+	addq.b	#1,(a0,d1.w)		* 18		* 要求の回数
 	bra.w	RETNOI			* 10
 
 

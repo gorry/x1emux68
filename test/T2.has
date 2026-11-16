@@ -2,7 +2,7 @@
 * T.CMD (8 bytes/record: op,port,value,0,count.w,0,0) -> T.OUT
 *   op 0: OUT port,value   op 1: IN port x count   op 2: OUT port,value+i x count
 * with -s FDSW=1 (new X1IO + X1D88 only):
-*   op 3: FDNAME[value] = 'S',('A'+value),'.IMG'   op 4: FDCHG[port] = $FF   op 5: FDSET0
+*   op 3: FDNAME[value] = 'S',('A'+value),'.IMG'   op 4: FDCHG[port] += 1   op 5: FDSET0
 
 	.cpu	68000
 
@@ -10,6 +10,7 @@
 	.xdef	S_CONT,D_CONT,D_KEY,D_CTC,C_CTC,V_KEY,V_CTC
 	.xdef	F_REPT,F_SIFT,F_LOCK,F_KBF,F_PSGSW,F_OPMSW
 	.xdef	TXTY,X1MODE
+	.xdef	STNAME,STLEDR,STLEDW,STSCR0,STSCR1
 
 	.xref	I0F00,O0F00,A_IOB,FD0
  if FDSW
@@ -17,6 +18,11 @@
  endif
 
 	.text
+STNAME:
+STLEDR:
+STLEDW:
+	rts
+
 START:
 	lea	NIMG,a0
 	lea	FD0,a1
@@ -80,7 +86,7 @@ DO_CHG:
 	moveq	#0,d0
 	move.b	CMD+1,d0
 	lea	FDCHG,a0
-	st	(a0,d0.w)
+	addq.b	#1,(a0,d0.w)
 	bra	LOOP
 DO_SET0:
 	jsr	FDSET0
@@ -195,6 +201,8 @@ NOUT:	dc.b	'T.OUT',0
 NIMG:	dc.b	'T.IMG',0
 MSBRK:	dc.b	'REGISTER BROKEN',13,10,0
 	.even
+STSCR0:	dc.w	$0200
+STSCR1:	dc.w	$0300
 WARN0:	dc.l	0
 WARN1:	dc.l	0
 T_OPC:

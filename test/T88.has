@@ -7,12 +7,18 @@
 	.xdef	P_DISK,B_DISK
 	.xdef	A_RDAT,A_WDAT,E_RDST
 	.xdef	FD0
+	.xdef	STNAME,STLEDR,STLEDW
 
 	.xref	D88INIT,D88OPEN,D88CHK,D88RREC
 	.xref	D88RD,D88RA,D88WC,D88WR
 	.xref	D88TYPE
 
 	.text
+STNAME:
+STLEDR:
+STLEDW:
+	rts
+
 START:
 	jsr	D88INIT
 	clr.w	-(sp)

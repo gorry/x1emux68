@@ -16,13 +16,14 @@
 	.xdef	D88INIT,D88OPEN,D88CHK,D88RREC
 	.xdef	D88RD,D88RA,D88WC,D88WR
 	.xdef	D88TYPE
-	.xdef	FDINIT,FDSET0,FDSWAP
-	.xdef	FDNAME,FDCHG
+	.xdef	FDINIT,FDSET0,FDSWAP,FDNEXT
+	.xdef	FDNAME,FDCHG,FDSET
 
 	.xref	CDRIVE,TRACK,HEAD,FILENO,SCAD
 	.xref	P_DISK,B_DISK
 	.xref	A_RDAT,A_WDAT,E_RDST
 	.xref	FD0
+	.xref	STNAME
 
 TBLMAX	equ	164			* トラックオフセットテーブルの個数
 SECMAX	equ	64			* １トラックで扱うセクタの個数
@@ -815,30 +816,21 @@ FDT_1:	move.l	(a0)+,(a1)+
 	rts
 
 
-*	入れ替えの要求 (FDCHG) を処理する
-*	ドライブごとに、次のファイル名のある組へ進める
-*	out	d0.l = 1 : カレントドライブのファイルを閉じた (開き直すこと)
-*		       0 : そのほか
+*	ドライブ d3.w の、組 d2.w の次のファイル名のある組を探す
+*	(割り込みからも呼ぶ。レジスタだけで動く)
+*	out	d0.l = 1 : あった / 0 : ほかにファイル名がない
+*		d1.w = 次の組
+*		a2   = そのファイル名
 
-FDSWAP:
-	movem.l	d1-d4/a0/a2-a3,-(sp)
-	moveq	#0,d4
-	moveq	#0,d3				* d3 = ドライブNo.
-FDW_1:	lea	FDCHG,a0
-	tst.b	(a0,d3.w)
-	beq.s	FDW_6
-	sf	(a0,d3.w)
-
-	lea	FDSET,a0
-	moveq	#0,d2
-	move.b	(a0,d3.w),d2			* d2 = 今の組
+FDNEXT:
+	move.l	d2,-(sp)
 	move.w	d2,d1
-FDW_2:	addq.w	#1,d1				* d1 = 次の組
+FDX_1:	addq.w	#1,d1				* d1 = 次の組
 	cmpi.w	#FDSETS,d1
-	bcs.s	FDW_3
+	bcs.s	FDX_2
 	moveq	#0,d1
-FDW_3:	cmp.w	d2,d1
-	beq.s	FDW_6				* ほかにファイル名がない
+FDX_2:	cmp.w	d2,d1
+	beq.s	FDX_3
 	move.w	d1,d0
 	lsl.w	#2,d0
 	add.w	d3,d0
@@ -846,9 +838,41 @@ FDW_3:	cmp.w	d2,d1
 	lea	FDNAME,a2
 	adda.w	d0,a2
 	tst.b	(a2)
-	beq.s	FDW_2
+	beq.s	FDX_1
+	move.l	(sp)+,d2
+	moveq	#1,d0
+	rts
+FDX_3:	move.l	(sp)+,d2
+	moveq	#0,d0
+	rts
 
-	move.b	d1,(a0,d3.w)			* 組を進める
+
+*	入れ替えの要求 (FDCHG) を処理する
+*	ドライブごとに、要求の回数だけ、次のファイル名のある組へ進める
+*	out	d0.l = 1 : カレントドライブのファイルを閉じた (開き直すこと)
+*		       0 : そのほか
+
+FDSWAP:
+	movem.l	d1-d6/a0/a2-a3,-(sp)
+	moveq	#0,d4
+	moveq	#0,d3				* d3 = ドライブNo.
+FDW_1:	lea	FDCHG,a0
+	move.b	(a0,d3.w),d5			* d5 = 要求の回数
+	beq.w	FDW_6
+	sub.b	d5,(a0,d3.w)
+
+	lea	FDSET,a0
+	moveq	#0,d2
+	move.b	(a0,d3.w),d2			* d2 = 今の組
+	move.w	d2,d6				* d6 = 元の組
+FDW_2:	bsr	FDNEXT				* d1 = 次の組 / a2 = ファイル名
+	beq.w	FDW_6				* ほかにファイル名がない
+	move.w	d1,d2
+	subq.b	#1,d5
+	bne.s	FDW_2
+	cmp.w	d6,d2
+	beq.w	FDW_6				* 一周して元の組に戻った
+	move.b	d2,(a0,d3.w)			* 組を進める
 	move.w	d3,d0
 	lsl.w	#7,d0
 	lea	FD0,a3
@@ -870,11 +894,12 @@ FDW_4:	move.l	(a2)+,(a3)+
 	bne.s	FDW_5
 	moveq	#1,d4
 FDW_5:	move.w	#-1,TC_DRV			* トラックバッファ無効
+	jsr	STNAME				* ステータス行のファイル名
 FDW_6:	addq.w	#1,d3
 	cmpi.w	#4,d3
 	bcs.w	FDW_1
 	move.l	d4,d0
-	movem.l	(sp)+,d1-d4/a0/a2-a3
+	movem.l	(sp)+,d1-d6/a0/a2-a3
 	tst.l	d0
 	rts
 
@@ -883,7 +908,7 @@ FDW_6:	addq.w	#1,d3
 	.even
 
 FDSET:	ds.b	4			* ドライブごとの今の組 (0-9)
-FDCHG:	ds.b	4			* ドライブごとの入れ替えの要求 ($FF = あり)
+FDCHG:	ds.b	4			* ドライブごとの入れ替えの要求の回数
 FDNAME:	ds.b	FDSETS*4*FNSIZ		* 組ごと・ドライブごとのファイル名
 
 D88TYPE:	ds.b	4		* ドライブごとの形式 ($00=2D / $FF=D88)

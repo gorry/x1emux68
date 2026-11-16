@@ -201,15 +201,17 @@ s.write(9, 0x44, tag="w"); s.read(9, tag="p1w")
 s.chg(0); s.select(1, motor=0); s.select(1); s.seek(3); s.read(2, tag="p2")   # 組5 (モーターOFFの間に)
 s.chg(0); s.read(2, tag="p3")                                     # 組0 に戻る
 s.chg(1); s.read(2, tag="p4")                                     # ドライブ1は組0だけ: 変わらない
-s.chg(0); s.chg(0); s.read(2, tag="p5")                           # 要求は1回分: 組2
-s.read(9, tag="p5w")
+s.chg(0); s.chg(0); s.read(2, tag="p5")                           # 2回押す: 組2を飛び越えて組5
+s.chg(0); s.chg(0); s.read(2, tag="p6")                           # 2回押す: 組0を通って組2
+s.read(9, tag="p6w")
+s.chg(0); s.chg(0); s.chg(0); s.read(2, tag="p7")                 # 3回押す: 一周して組2のまま
 r5, w5, f5 = run("T2N.x", d88, s)
-exp = {"p0": raw, "p1": rawB, "p2": rawC, "p3": raw, "p4": raw, "p5": rawB}
+exp = {"p0": raw, "p1": rawB, "p2": rawC, "p3": raw, "p4": raw, "p5": rawC, "p6": rawB, "p7": rawB}
 for k, img in exp.items():
     check("swap " + k, r5[k + " st0"] == [bytes([3])] and r5[k + " data"][0] == want(img, 3, 1, 2), (k, r5[k + " st0"]))
 patw = bytes((0x44 + i) & 255 for i in range(256))
 after = open("SI.IMG", "rb").read()
-check("swap write", r5["p1w data"][0] == patw and r5["p5w data"][0] == patw and want(after, 3, 1, 9) == patw
+check("swap write", r5["p1w data"][0] == patw and r5["p6w data"][0] == patw and want(after, 3, 1, 9) == patw
       and f5 == d88 and open("SU.IMG", "rb").read()[0x2B0:0x2C0] is not None)
 
 print("FAILS", fails)

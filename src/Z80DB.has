@@ -27,6 +27,7 @@
 		.xref	F_DISP
 		.xref	INITFM
 		.xref	RETCRTC
+		.xref	STINIT,STHIDE
 
 PwCRTC00	equ	$E80000		* CRTC R00
 PwSCTXTY	equ	$E80016		* CRTC R11  テキストスクロール（Ｙ方向）
@@ -256,9 +257,11 @@ X1CRT_LP:	move.w	(a0)+,(a1)+
 		dbf	d0,X1CRT_LP
 		move.b	(a0)+,PsCRTC20		* CRTC R20 L
 
+		jsr	STINIT			* ステータス行を描き直す (表示期間も広げる)
 		rts
 
 DBCRT::
+		jsr	STHIDE			* ステータス行を消す
 		moveq.l	#0,d0
 		move.w	d0,(PwSCTXTY)
 		move.w	d0,(PwSCGP0Y)
