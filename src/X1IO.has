@@ -31,6 +31,13 @@
 	.xdef	END
 	.xdef	O1E00
 
+	.xdef	CDRIVE,TRACK,HEAD,FILENO,SCAD
+	.xdef	P_DISK,B_DISK
+	.xdef	A_RDAT,A_WDAT,E_RDST
+
+	.xref	D88INIT,D88OPEN
+	.xref	D88RD,D88RA,D88WC,D88WR
+
 	.xref	A_BAS
 	.xref	T_OPC,T_ROM
 	.xref	A_MEM,A_WOM
@@ -149,6 +156,11 @@ INITIO:
 	bset	#4,PsMFPIMA				* キー割り込み許可
 
 	dc.w	$FF1F					* DOS _ALLCLOSE
+	move.w	#$FFFF,FILENO+4*0			* FILENO = $FFFF
+	move.w	#$FFFF,FILENO+4*1
+	move.w	#$FFFF,FILENO+4*2
+	move.w	#$FFFF,FILENO+4*3
+	jsr	D88INIT
 	move.b	#$01,A_IOB+$0FFA			* ＦＤＣリセット
 	move.l	#$00000000,TRACK+4*0
 	move.l	#$00000000,TRACK+4*1
@@ -909,6 +921,7 @@ I0F00:
 	move.w	d0,(a0)				*  8
 	rts					* 16
 A_RDAT:	dc.w	$00ff
+E_RDST:	dc.w	$0000						* 上位 = $FF:リードデータ(1セクタ) / 下位 = 終了時のステータス
 INNOCT:
 	beq.s	INESCT				*  8(10)
 	addq.w	#1,d0				*  4		* P_DISK = -1
@@ -919,15 +932,7 @@ INNOCT:
 	rts					* 16
 INESCT:
 	move.w	#-1,(a0)			* 12
-	cmpi.w	#$0100-1,d0			*  8
-	bls.s	RTIsSC				*  8(10)
-	cmpi.w	#$1000-1,d0			*  8
-	beq.s	RTImSC				*  8(10)
-	move.b	#%00000100,$0FF8(a1)		* 16		* Lost Data
-	rts					* 16
-RTImSC:	move.b	#%00010000,$0FF8(a1)		* 16		* Record Not Found
-	rts					* 16
-RTIsSC:	move.b	#%00000000,$0FF8(a1)		* 16
+	move.b	(E_RDST+1),$0FF8(a1)		* 22
 	rts					* 16
 INNODR:
 	addq.b	#$03,d0				*  4		* $0FF8(STR)
@@ -939,8 +944,8 @@ INNODR:
 	clr.b	d1				*  4
 	rts					* 16
 RTIFF8::	move.b	$0FF8(a1),d1			* 12
-	cmpi.w	#$100-1,(A_RDAT)
-	bne	RTIFF8_1
+	tst.b	(E_RDST)
+	beq	RTIFF8_1
 	lea	P_DISK-A_MEM(aME),a0		*  8
 	cmp.w	#-2,(a0)
 	bne	RTIFF8_1
@@ -978,11 +983,14 @@ OTNOCT:
 	rts					* 16
 OTESCT:
 	move.w	#-1,(a0)			* 12
+	jsr	D88WR				* 20		* D88形式なら書き込む
+	bne.s	OTD88				*  8(10)
 	cmpi.w	#$0100-1,d0			*  8
 	beq.w	WRTsSC				* 12(10)
 	cmpi.w	#$1000-1,d0			*  8
 	bne.w	WRTTRK				* 12(10)
 	bra.w	WRTmSC				* 10
+OTD88:	rts					* 16
 OTNODR:
 	addq.b	#$03,d0				*  4		* $0FF8(CR)
 	beq.s	O0FF8				*  8(10)
@@ -1057,6 +1065,9 @@ FOPEN:
 	tst.l	d0				*  4
 	bmi.s	MTONWP				*  8(10)
 	move.w	d0,FILENO-CDRIVE(a0,d1.w)	* 14		* FILENO = ファイルハンドル
+	jsr	D88OPEN				* 20		* D88形式ならヘッダを読む
+	or.b	d0,FILENO+2-CDRIVE(a0,d1.w)	* 18		* Write Protect
+	or.b	d0,$0FF8(a1)			* 16
 	moveq	#0,d0				*  4
 	rts					* 16
 MTONWP:
@@ -1168,17 +1179,22 @@ READTRAK:						* リードトラック
 	move.w	#$1900-1,(A_RDAT)	* 16
 	move.l	#$1900,-(sp)			* 20		* SIZE = $1900
 	move.b	#$00,SECTOR-A_MEM(aME)		* 16
+	move.w	#$0004,(E_RDST)		* 20		* Lost Data
 	bra.s	RDATA				* 10
 READDATAm:
 	move.w	#$1000-1,(A_RDAT)	* 16
 	move.l	#$1000,-(sp)			* 20		* SIZE = $1000
+	move.w	#$0010,(E_RDST)		* 20		* Record Not Found
 	bra.s	RDATA				* 10
 READDATA:						* リードデータ
 	move.w	#$0100-1,(A_RDAT)	* 16
 	move.l	#$0100,-(sp)			* 20		* SIZE =  $100
+	move.w	#$FF00,(E_RDST)		* 20
 RDATA:
 	lea	CDRIVE-A_MEM(aME),a0		*  8
 	move.w	(a0),d1				*  8
+	jsr	D88RD				* 20		* D88形式なら読み込む
+	bne.s	RDD88				*  8(10)
 	move.l	TRACK-CDRIVE(a0,d1.w),d0	* 18		*   TRACK
 	add.w	HEAD-CDRIVE(a0),d0		* 12		* + HEAD
 	add.w	SECTOR-CDRIVE(a0),d0		* 12		* + SECTOR
@@ -1208,12 +1224,17 @@ RDERR2:	addq.w	#4,sp				*  4
 RDERR:	moveq	#%00010000,d0			*  4		* Record Not Found
 	move.b	d0,$0FF8(a1)			* 12
 	rts					* 16
+RDD88:	addq.w	#4,sp				*  4
+	rts					* 16
 
 READADRS:						* リードアドレス
 	move.w	#$0006-1,(A_RDAT)	* 16
+	clr.w	(E_RDST)			* 20
 
 	lea	CDRIVE-A_MEM(aME),a0		*  8
 	move.w	#0,P_DISK-CDRIVE(a0)		* 16		* P_DISK = 0
+	jsr	D88RA				* 20		* D88形式ならIDを読む
+	bne.s	RAD88				*  8(10)
 	move.w	(a0),d1				*  8
 	move.l	TRACK-CDRIVE(a0,d1.w),d0	* 18		*   TRACK
 	move.b	HEAD-CDRIVE(a0),d1		* 12		* + HEAD
@@ -1237,7 +1258,7 @@ READADRS:						* リードアドレス
 	move.b	#$00,(a0)+			* 12		* ＣＲＣ２
 
 	move.b	#%00000011,$0FF8(a1)		* 16		* Data Request & Busy
-	rts					* 16
+RAD88:	rts					* 16
 
 WRITTRAK:						* ライトトラック
 	move.w	#$1900-1,(A_WDAT)	* 16
@@ -1252,10 +1273,12 @@ WDATA:
 	move.w	(a0),d1				*  8
 	move.b	FILENO+2-CDRIVE(a0,d1.w),d0	* 14
 	bne.s	WRITEP				*  8(10)
+	jsr	D88WC				* 20		* D88形式ならセクタを調べる
+	bne.s	WDD88				*  8(10)
 
 	move.w	#0,P_DISK-CDRIVE(a0)		* 16		* P_DISK = 0
 	move.b	#%00000011,$0FF8(a1)		* 16		* Data Request & Busy
-	rts					* 16
+WDD88:	rts					* 16
 WRITEP:
 	move.b	d0,$0FF8(a1)			* 12
 	rts					* 16

@@ -1,0 +1,799 @@
+*************************************************
+*						*
+*   D88 ディスクイメージ for Ｘ１エミュレータ	*
+*						*
+*************************************************
+
+	.cpu	68000
+
+*	X1IO.has のＦＤＣエミュレータから呼ばれる
+*
+*	a1    A_IOB
+*
+*	D88RD,D88RA,D88WC,D88WR は、カレントドライブが
+*	D88形式でなければ何もしないで戻る
+
+	.xdef	D88INIT,D88OPEN,D88CHK,D88RREC
+	.xdef	D88RD,D88RA,D88WC,D88WR
+	.xdef	D88TYPE
+
+	.xref	CDRIVE,TRACK,HEAD,FILENO,SCAD
+	.xref	P_DISK,B_DISK
+	.xref	A_RDAT,A_WDAT,E_RDST
+
+TBLMAX	equ	164			* トラックオフセットテーブルの個数
+SECMAX	equ	64			* １トラックで扱うセクタの個数
+HDRSIZ	equ	$2B0			* ヘッダの大きさ
+TRKSIZ	equ	$4000			* トラックバッファの大きさ
+BUFSIZ	equ	$1900			* B_DISK の大きさ
+
+*	セクタヘッダ (16バイト)
+SH_C	equ	$00			* C
+SH_H	equ	$01			* H
+SH_R	equ	$02			* R
+SH_N	equ	$03			* N
+SH_NSEC	equ	$04			* トラック内のセクタ数 (LE)
+SH_DEL	equ	$07			* 削除フラグ
+SH_STAT	equ	$08			* ステータス
+SH_SIZE	equ	$0E			* データの大きさ (LE)
+SH_DATA	equ	$10			* データ
+
+
+	.text
+
+*---------------------------------------*
+*		初期化			*
+*---------------------------------------*
+
+D88INIT:
+	clr.l	D88TYPE
+	move.w	#-1,TC_DRV
+	rts
+
+
+*---------------------------------------*
+*	ヘッダを読んで形式を調べる	*
+*---------------------------------------*
+*	in	d0.w = ファイルハンドル
+*		d1.w = ドライブNo.*4
+*	out	d0.l = %01000000 (D88形式で書き込み禁止) / 0
+
+D88OPEN:
+	movem.l	d1-d7/a0-a3,-(sp)
+	move.w	d0,d7				* d7 = ファイルハンドル
+	move.w	d1,d6				* d6 = ドライブNo.*4
+	move.w	#-1,TC_DRV			* トラックバッファ無効
+	lsr.w	#2,d1
+	lea	D88TYPE,a2
+	adda.w	d1,a2
+	clr.b	(a2)				* 2D形式
+
+	move.w	#2,-(sp)			* MODE = 2 (終わりからのOFFSET)
+	clr.l	-(sp)
+	move.w	d7,-(sp)
+	dc.w	$FF42						* DOS _SEEK
+	addq.l	#8,sp
+	move.l	d0,d5				* d5 = ファイルの大きさ
+	bmi	D8O_NO
+	clr.w	-(sp)				* MODE = 0 (先頭からのOFFSET)
+	clr.l	-(sp)
+	move.w	d7,-(sp)
+	dc.w	$FF42						* DOS _SEEK
+	addq.l	#8,sp
+	tst.l	d0
+	bmi	D8O_NO
+	move.l	#HDRSIZ,-(sp)
+	pea	HDRBUF
+	move.w	d7,-(sp)
+	dc.w	$FF3F						* DOS _READ
+	lea	10(sp),sp
+	cmpi.l	#HDRSIZ,d0
+	bne	D8O_NO
+
+	lea	HDRBUF,a0
+	move.b	$1A(a0),d0			* ライトプロテクト ($00/$10)
+	andi.b	#$EF,d0
+	bne	D8O_NO
+	move.b	$1B(a0),d0			* ディスクの種類 ($00-$40)
+	cmpi.b	#$40,d0
+	bhi	D8O_NO
+	andi.b	#$0F,d0
+	bne	D8O_NO
+
+	lea	$1C(a0),a0
+	bsr	D8_GETLE
+	move.l	d0,d4				* d4 = ディスクの大きさ
+	cmp.l	d5,d4
+	bhi	D8O_NO
+	cmpi.l	#HDRSIZ,d4
+	bcs	D8O_NO
+
+	bsr	D8_TBLADR			* a3 = トラックオフセットテーブル
+	movea.l	a3,a1
+	move.l	#$7FFFFFFF,d3			* d3 = 最初のトラックの位置
+	move.w	#TBLMAX-1,d2
+D8O_L1:	bsr	D8_GETLE
+	move.l	d0,(a1)+
+	beq.s	D8O_L2
+	cmpi.w	#4,d2				* 161個め以降はデータかもしれない
+	bcs.s	D8O_L2
+	cmp.l	d3,d0
+	bcc.s	D8O_L2
+	move.l	d0,d3
+D8O_L2:	dbf	d2,D8O_L1
+
+	cmpi.l	#HDRSIZ-16,d3
+	bcs	D8O_NO
+	cmp.l	d4,d3
+	bcc	D8O_NO
+	cmpi.l	#HDRSIZ,d3
+	bcc.s	D8O_L3
+	clr.l	(TBLMAX-4)*4(a3)		* テーブルが160個のとき
+	clr.l	(TBLMAX-3)*4(a3)
+	clr.l	(TBLMAX-2)*4(a3)
+	clr.l	(TBLMAX-1)*4(a3)
+D8O_L3:
+	movea.l	a3,a1
+	move.w	#TBLMAX-1,d2
+D8O_L4:	cmp.l	(a1)+,d4
+	bls	D8O_NO
+	dbf	d2,D8O_L4
+
+	st	(a2)				* D88形式
+	moveq	#0,d0
+	cmpi.b	#$10,HDRBUF+$1A
+	bne.s	D8O_RT
+	moveq	#%01000000,d0			* Write Protect
+D8O_RT:	movem.l	(sp)+,d1-d7/a0-a3
+	rts
+D8O_NO:	moveq	#0,d0
+	bra.s	D8O_RT
+
+
+*	(a0)+ から４バイトのLEの値を d0 に読む
+
+D8_GETLE:
+	move.b	3(a0),d0
+	lsl.l	#8,d0
+	move.b	2(a0),d0
+	lsl.l	#8,d0
+	move.b	1(a0),d0
+	lsl.l	#8,d0
+	move.b	(a0),d0
+	addq.l	#4,a0
+	rts
+
+
+*	a3 = ドライブ d6 のトラックオフセットテーブル	(d0 破壊)
+
+D8_TBLADR:
+	move.w	d6,d0
+	mulu	#TBLMAX,d0
+	lea	D88TBL,a3
+	adda.l	d0,a3
+	rts
+
+
+*	カレントドライブの情報を得る
+*	out	d5.w = トラックNo.*2+サイド
+*		d6.w = ドライブNo.*4
+*		d7.w = ファイルハンドル
+*		Z = 1 : 2D形式				(d0,a0 破壊)
+
+D8_SETDRV:
+	move.w	CDRIVE,d6
+	lea	FILENO,a0
+	move.w	(a0,d6.w),d7
+	lea	TRACK,a0
+	move.l	(a0,d6.w),d5
+	swap	d5
+	rol.l	#3,d5				* d5=d5/$2000
+	add.w	d5,d5
+	tst.b	HEAD
+	beq.s	D8S_1
+	addq.w	#1,d5
+D8S_1:	move.w	d6,d0
+	lsr.w	#2,d0
+	lea	D88TYPE,a0
+	tst.b	(a0,d0.w)
+	rts
+
+
+*	a0 のセクタのデータの大きさを d0.l に得る (Z = 1 : 0)
+
+D8_SECLEN:
+	moveq	#0,d0
+	move.b	SH_SIZE+1(a0),d0
+	lsl.w	#8,d0
+	move.b	SH_SIZE(a0),d0
+	tst.w	d0
+	rts
+
+
+*---------------------------------------*
+*	トラックをバッファに読む	*
+*---------------------------------------*
+*	in	d5.w = トラックNo.*2+サイド
+*		d6.w = ドライブNo.*4
+*		d7.w = ファイルハンドル
+*	out	d0.l = 0 / -1 (セクタがない)
+
+D8_LDTRK:
+	tst.w	d7
+	bmi	D8L_NG2
+	cmp.w	TC_DRV,d6
+	bne.s	D8L_1
+	cmp.w	TC_TRK,d5
+	beq	D8L_HIT
+D8L_1:	movem.l	d1-d4/a0/a2-a3,-(sp)
+	move.w	#-1,TC_DRV
+	clr.w	TC_NSEC
+	cmpi.w	#TBLMAX,d5
+	bcc	D8L_NG
+	bsr	D8_TBLADR
+	move.w	d5,d0
+	lsl.w	#2,d0
+	move.l	(a3,d0.w),d4			* d4 = トラックの位置
+	beq	D8L_NG
+
+	clr.w	-(sp)				* MODE = 0 (先頭からのOFFSET)
+	move.l	d4,-(sp)
+	move.w	d7,-(sp)
+	dc.w	$FF42						* DOS _SEEK
+	addq.l	#8,sp
+	tst.l	d0
+	bmi	D8L_NG
+	move.l	#TRKSIZ,-(sp)
+	pea	TRKBUF
+	move.w	d7,-(sp)
+	dc.w	$FF3F						* DOS _READ
+	lea	10(sp),sp
+	move.l	d0,d3				* d3 = 残りのバイト数
+	bmi	D8L_NG
+
+	lea	TRKBUF,a0
+	lea	TC_SEC,a2
+	moveq	#0,d2				* d2 = セクタ数
+D8L_2:	moveq	#SH_DATA,d1
+	cmp.l	d1,d3
+	bcs.s	D8L_5
+	tst.w	d2
+	bne.s	D8L_4
+	moveq	#0,d0				* 最初のセクタからセクタ数を得る
+	move.b	SH_NSEC+1(a0),d0
+	lsl.w	#8,d0
+	move.b	SH_NSEC(a0),d0
+	tst.w	d0
+	beq.s	D8L_5
+	cmpi.w	#SECMAX,d0
+	bls.s	D8L_3
+	moveq	#SECMAX,d0
+D8L_3:	move.w	d0,TC_LIM
+D8L_4:	bsr	D8_SECLEN
+	add.l	d0,d1				* d1 = ヘッダ + データ
+	cmp.l	d3,d1
+	bhi.s	D8L_5
+	move.l	a0,(a2)+
+	addq.w	#1,d2
+	adda.l	d1,a0
+	sub.l	d1,d3
+	cmp.w	TC_LIM,d2
+	bcs.s	D8L_2
+D8L_5:	move.l	a0,TC_END
+	move.w	d2,TC_NSEC
+	move.l	d4,TC_OFS
+	move.w	d5,TC_TRK
+	move.w	d6,TC_DRV
+	movem.l	(sp)+,d1-d4/a0/a2-a3
+D8L_HIT:
+	tst.w	TC_NSEC
+	beq.s	D8L_NG2
+	moveq	#0,d0
+	rts
+D8L_NG:	movem.l	(sp)+,d1-d4/a0/a2-a3
+D8L_NG2:
+	moveq	#-1,d0
+	rts
+
+
+*---------------------------------------*
+*	バッファからセクタを探す	*
+*---------------------------------------*
+*	in	d0.b = C
+*		d1.b = R
+*	out	a0   = セクタヘッダ
+*		Z = 1 : あった / Z = 0 : ない (d0 破壊)
+
+D8_FNDSEC:
+	movem.l	d2/a3,-(sp)
+	lea	TC_SEC,a3
+	move.w	TC_NSEC,d2
+	beq.s	D8F_NG
+	subq.w	#1,d2
+D8F_1:	movea.l	(a3)+,a0
+	cmp.b	SH_C(a0),d0
+	bne.s	D8F_2
+	cmp.b	SH_R(a0),d1
+	bne.s	D8F_2
+	cmpi.b	#$A0,SH_STAT(a0)		* IDのCRCエラー
+	beq.s	D8F_2
+	cmpi.b	#$E0,SH_STAT(a0)		* IDがない
+	beq.s	D8F_2
+	movem.l	(sp)+,d2/a3
+	cmp.w	d0,d0
+	rts
+D8F_2:	dbf	d2,D8F_1
+D8F_NG:	movem.l	(sp)+,d2/a3
+	moveq	#-1,d0
+	rts
+
+
+*	a0 のセクタのデータを (a2)+ へコピーする
+*	in	d2.b = 終了時のステータス
+*		d3.l = コピー済みのバイト数
+*	out	d0.l = 0 / -1 (コピーできない)		(d1,a0 破壊)
+
+D8_CPSEC:
+	move.b	SH_STAT(a0),d0
+	cmpi.b	#$F0,d0				* データがない
+	beq.s	D8C_NG
+	bsr	D8_SECLEN
+	beq.s	D8C_NG
+	move.l	d3,d1
+	add.l	d0,d1
+	cmpi.l	#BUFSIZ,d1
+	bhi.s	D8C_NG
+	move.l	d1,d3
+
+	move.b	SH_STAT(a0),d1
+	cmpi.b	#$B0,d1				* データのCRCエラー
+	bne.s	D8C_1
+	ori.b	#%00001000,d2			* CRC Error
+D8C_1:	cmpi.b	#$10,d1
+	beq.s	D8C_2
+	cmpi.b	#$10,SH_DEL(a0)
+	bne.s	D8C_3
+D8C_2:	ori.b	#%00100000,d2			* Record Type (Deleted Data)
+D8C_3:	lea	SH_DATA(a0),a0
+	subq.w	#1,d0
+D8C_4:	move.b	(a0)+,(a2)+
+	dbf	d0,D8C_4
+	moveq	#0,d0
+	rts
+D8C_NG:	moveq	#-1,d0
+	rts
+
+
+*---------------------------------------*
+*    リードデータ / リードトラック	*
+*---------------------------------------*
+*	in	(A_RDAT) = $00FF / $0FFF / $18FF
+*	out	Z = 1 : 2D形式 (何もしない)
+*		Z = 0 : D88形式 (処理済み)
+
+D88RD:
+	movem.l	d2-d7/a0/a2-a4,-(sp)
+	bsr	D8_SETDRV
+	beq	D8R_RAW
+	bsr	D8_LDTRK
+	bne	D8R_RNF
+	lea	B_DISK,a2
+	moveq	#0,d3				* d3 = バイト数
+	moveq	#0,d2				* d2 = 終了時のステータス
+	move.w	A_RDAT,d4
+	cmpi.w	#$1900-1,d4
+	beq.s	D8R_TRK
+	move.b	$0FFA(a1),d5			* d5 = SCR
+	cmpi.w	#$1000-1,d4
+	beq.s	D8R_MUL
+
+	move.b	$0FF9(a1),d0			* リードデータ
+	move.b	d5,d1
+	bsr	D8_FNDSEC
+	bne	D8R_RNF
+	bsr	D8_CPSEC
+	bne	D8R_RNF
+	bra.s	D8R_OK
+
+D8R_MUL:					* リードデータ m
+	move.b	$0FF9(a1),d0
+	move.b	d5,d1
+	bsr	D8_FNDSEC
+	bne.s	D8R_M1
+	bsr	D8_CPSEC
+	bne.s	D8R_M1
+	addq.b	#1,d5
+	bra.s	D8R_MUL
+D8R_M1:	tst.l	d3
+	beq.s	D8R_RNF
+	ori.b	#%00010000,d2			* Record Not Found
+	bra.s	D8R_OK
+
+D8R_TRK:					* リードトラック
+	lea	TC_SEC,a3
+	move.w	TC_NSEC,d5
+	subq.w	#1,d5
+D8R_T1:	movea.l	(a3)+,a0
+	bsr	D8_CPSEC
+	dbf	d5,D8R_T1
+	move.l	#BUFSIZ,d0
+	sub.l	d3,d0
+	beq.s	D8R_T3
+	subq.w	#1,d0
+D8R_T2:	clr.b	(a2)+
+	dbf	d0,D8R_T2
+D8R_T3:	move.l	#BUFSIZ,d3
+	moveq	#%00000100,d2			* Lost Data
+
+D8R_OK:	subq.w	#1,d3
+	move.w	d3,A_RDAT
+	move.b	d2,E_RDST+1
+	move.w	#-2,P_DISK			* P_DISK = -2
+	move.b	#%00000011,$0FF8(a1)		* Data Request & Busy
+	bra.s	D8R_RT
+D8R_RNF:
+	move.b	#%00010000,$0FF8(a1)		* Record Not Found
+D8R_RT:	movem.l	(sp)+,d2-d7/a0/a2-a4
+	moveq	#0,d1
+	moveq	#1,d0
+	rts
+D8R_RAW:
+	movem.l	(sp)+,d2-d7/a0/a2-a4
+	moveq	#0,d0
+	rts
+
+
+*---------------------------------------*
+*	     リードアドレス		*
+*---------------------------------------*
+*	out	Z = 1 : 2D形式 (何もしない)
+*		Z = 0 : D88形式 (処理済み)
+
+D88RA:
+	movem.l	d2-d7/a0/a2-a4,-(sp)
+	bsr	D8_SETDRV
+	beq	D8A_RAW
+	bsr	D8_LDTRK
+	bne.s	D8A_RNF
+	moveq	#0,d0
+	move.b	SCAD,d0
+	addq.w	#1,d0
+	cmp.w	TC_NSEC,d0
+	bcs.s	D8A_1
+	moveq	#0,d0
+D8A_1:	move.b	d0,SCAD
+	lsl.w	#2,d0
+	lea	TC_SEC,a0
+	movea.l	(a0,d0.w),a0
+	lea	B_DISK,a2
+	move.b	(a0)+,d0
+	move.b	d0,$0FFA(a1)
+	move.b	d0,(a2)+			* トラックアドレス
+	move.b	(a0)+,(a2)+			* サイドナンバー
+	move.b	(a0)+,(a2)+			* セクタアドレス
+	move.b	(a0)+,(a2)+			* セクタ長
+	clr.b	(a2)+				* ＣＲＣ１
+	clr.b	(a2)+				* ＣＲＣ２
+	clr.w	P_DISK				* P_DISK = 0
+	move.b	#%00000011,$0FF8(a1)		* Data Request & Busy
+	bra.s	D8A_RT
+D8A_RNF:
+	move.w	#-1,P_DISK			* P_DISK = -1
+	move.b	#%00010000,$0FF8(a1)		* Record Not Found
+D8A_RT:	movem.l	(sp)+,d2-d7/a0/a2-a4
+	moveq	#0,d1
+	moveq	#1,d0
+	rts
+D8A_RAW:
+	movem.l	(sp)+,d2-d7/a0/a2-a4
+	moveq	#0,d0
+	rts
+
+
+*---------------------------------------*
+*  ライトデータ / ライトトラック (開始)	*
+*---------------------------------------*
+*	in	(A_WDAT) = $00FF / $0FFF / $18FF
+*	out	Z = 1 : データを受け取る
+*		Z = 0 : エラー (ステータス設定済み)
+
+D88WC:
+	movem.l	d2-d7/a0/a2-a4,-(sp)
+	bsr	D8_SETDRV
+	beq	D8W_OK
+	move.w	A_WDAT,d4
+	bsr	D8_LDTRK
+	bne	D8W_NG
+	cmpi.w	#$1900-1,d4
+	beq.s	D8W_TRK
+	move.b	$0FFA(a1),d5			* d5 = SCR
+	cmpi.w	#$1000-1,d4
+	beq.s	D8W_MUL
+
+	move.b	$0FF9(a1),d0			* ライトデータ
+	move.b	d5,d1
+	bsr	D8_FNDSEC
+	bne	D8W_RNF
+	bsr	D8_SECLEN
+	beq	D8W_RNF
+	cmpi.l	#BUFSIZ,d0
+	bhi	D8W_RNF
+	move.l	d0,d3
+	clr.b	W_MODE
+	bra.s	D8W_SET
+
+D8W_MUL:					* ライトデータ m
+	moveq	#0,d3				* d3 = バイト数
+D8W_M1:	move.b	$0FF9(a1),d0
+	move.b	d5,d1
+	bsr	D8_FNDSEC
+	bne.s	D8W_M2
+	bsr	D8_SECLEN
+	beq.s	D8W_M2
+	add.l	d3,d0
+	cmpi.l	#BUFSIZ,d0
+	bhi.s	D8W_M2
+	move.l	d0,d3
+	addq.b	#1,d5
+	bra.s	D8W_M1
+D8W_M2:	tst.l	d3
+	beq.s	D8W_RNF
+	move.b	#1,W_MODE
+D8W_SET:
+	subq.w	#1,d3
+	move.w	d3,A_WDAT
+	bra.s	D8W_OK
+
+D8W_TRK:					* ライトトラック
+	move.b	#2,W_MODE
+D8W_OK:	movem.l	(sp)+,d2-d7/a0/a2-a4
+	moveq	#0,d0
+	rts
+
+D8W_NG:	cmpi.w	#$1900-1,d4
+	bne.s	D8W_RNF
+	move.b	#%00100000,$0FF8(a1)		* Write Fault
+	bra.s	D8W_ER
+D8W_RNF:
+	move.b	#%00010000,$0FF8(a1)		* Record Not Found
+D8W_ER:	movem.l	(sp)+,d2-d7/a0/a2-a4
+	moveq	#0,d1
+	moveq	#1,d0
+	rts
+
+
+*---------------------------------------*
+*  ライトデータ / ライトトラック (終了)	*
+*---------------------------------------*
+*	B_DISK に受け取ったデータをファイルに書く
+*	out	Z = 1 : 2D形式 (何もしない)
+*		Z = 0 : D88形式 (処理済み)
+
+D88WR:
+	movem.l	d0-d7/a0/a2-a4,-(sp)
+	bsr	D8_SETDRV
+	beq	D8X_RAW
+	bsr	D8_LDTRK
+	bne	D8X_ERR
+	lea	B_DISK,a2
+	moveq	#0,d3
+	move.w	A_WDAT,d3
+	addq.l	#1,d3				* d3 = 受け取ったバイト数
+	move.b	W_MODE,d4
+	beq.s	D8X_SGL
+	subq.b	#1,d4
+	beq.s	D8X_MUL
+
+	lea	TC_SEC,a3			* ライトトラック
+	move.w	TC_NSEC,d5
+	subq.w	#1,d5
+D8X_T1:	movea.l	(a3)+,a0
+	clr.b	SH_DEL(a0)
+	clr.b	SH_STAT(a0)
+	bsr	D8_SECLEN
+	beq.s	D8X_T3
+	lea	SH_DATA(a0),a0
+	subq.w	#1,d0
+D8X_T2:	st	(a0)+
+	dbf	d0,D8X_T2
+D8X_T3:	dbf	d5,D8X_T1
+	lea	TRKBUF,a0
+	move.l	TC_OFS,d1
+	move.l	TC_END,d2
+	sub.l	a0,d2
+	bsr	D8_FWRITE
+	bne.s	D8X_ERR
+	moveq	#%00000000,d2
+	bra.s	D8X_ST
+
+D8X_SGL:					* ライトデータ
+	move.b	$0FF9(a1),d0
+	move.b	$0FFA(a1),d1
+	bsr	D8_FNDSEC
+	bne.s	D8X_ERR
+	bsr	D8_WRSEC
+	bne.s	D8X_ERR
+	moveq	#%00000000,d2
+	bra.s	D8X_ST
+
+D8X_MUL:					* ライトデータ m
+	move.b	$0FFA(a1),d5			* d5 = SCR
+D8X_M1:	tst.l	d3
+	beq.s	D8X_M2
+	move.b	$0FF9(a1),d0
+	move.b	d5,d1
+	bsr	D8_FNDSEC
+	bne.s	D8X_M2
+	bsr	D8_WRSEC
+	bne.s	D8X_M2
+	addq.b	#1,d5
+	bra.s	D8X_M1
+D8X_M2:	moveq	#%00010000,d2			* Record Not Found
+	bra.s	D8X_ST
+
+D8X_ERR:
+	moveq	#%00010000,d2			* Record Not Found
+D8X_ST:	move.b	d2,$0FF8(a1)
+	movem.l	(sp)+,d0-d7/a0/a2-a4
+	moveq	#0,d1
+	moveq	#1,d0
+	rts
+D8X_RAW:
+	movem.l	(sp)+,d0-d7/a0/a2-a4
+	cmp.w	d0,d0
+	rts
+
+
+*	(a2)+ のデータを a0 のセクタに書く
+*	in	d3.l = 残りのバイト数
+*		d7.w = ファイルハンドル
+*	out	d0.l = 0 / -1 (書けない)		(d1,d2 破壊)
+
+D8_WRSEC:
+	move.l	a3,-(sp)
+	bsr	D8_SECLEN
+	beq.s	D8Y_NG
+	cmp.l	d3,d0
+	bhi.s	D8Y_NG
+	sub.l	d0,d3
+	clr.b	SH_DEL(a0)
+	clr.b	SH_STAT(a0)
+	lea	SH_DATA(a0),a3
+	move.l	d0,d2
+	subq.w	#1,d0
+D8Y_1:	move.b	(a2)+,(a3)+
+	dbf	d0,D8Y_1
+	moveq	#SH_DATA,d0
+	add.l	d0,d2				* d2 = ヘッダ + データ
+	move.l	a0,d1
+	subi.l	#TRKBUF,d1
+	add.l	TC_OFS,d1			* d1 = ファイル内の位置
+	bsr	D8_FWRITE
+	movea.l	(sp)+,a3
+	rts
+D8Y_NG:	movea.l	(sp)+,a3
+	moveq	#-1,d0
+	rts
+
+
+*	a0 から d2.l バイトを、ファイルの d1.l の位置に書く
+*	in	d7.w = ファイルハンドル
+*	out	d0.l = 0 / -1 (書けない)
+
+D8_FWRITE:
+	clr.w	-(sp)				* MODE = 0 (先頭からのOFFSET)
+	move.l	d1,-(sp)
+	move.w	d7,-(sp)
+	dc.w	$FF42						* DOS _SEEK
+	addq.l	#8,sp
+	tst.l	d0
+	bmi.s	D8Z_NG
+	move.l	d2,-(sp)
+	move.l	a0,-(sp)
+	move.w	d7,-(sp)
+	dc.w	$FF40						* DOS _WRITE
+	lea	10(sp),sp
+	cmp.l	d2,d0
+	bne.s	D8Z_NG
+	moveq	#0,d0
+	rts
+D8Z_NG:	moveq	#-1,d0
+	rts
+
+
+*---------------------------------------*
+*    IPL ROMなしの起動用 (ドライブ0)	*
+*---------------------------------------*
+
+*	ファイルの形式を調べる
+*	in	d1.w = ファイルハンドル
+*	out	d0.l = 0 (2D形式) / $FF (D88形式)
+*		ファイルの読み書き位置は先頭に戻る
+
+D88CHK:
+	move.l	d1,-(sp)
+	move.w	d1,d0
+	moveq	#0,d1
+	bsr	D88OPEN
+	move.l	(sp)+,d1
+	clr.w	-(sp)				* MODE = 0 (先頭からのOFFSET)
+	clr.l	-(sp)
+	move.w	d1,-(sp)
+	dc.w	$FF42						* DOS _SEEK
+	addq.l	#8,sp
+	moveq	#0,d0
+	move.b	D88TYPE,d0
+	rts
+
+
+*	256バイトを１レコードとして、レコードの並びを読む
+*	(１トラック16セクタ、１セクタ256バイトのディスクだけ)
+*	in	d0.l = 最初のレコードNo.
+*		d1.w = ファイルハンドル
+*		d2.l = バイト数
+*		a0   = 読み込むアドレス
+*	out	d0.l = 0 / -1 (読めない)
+
+D88RREC:
+	movem.l	d1-d7/a0-a4,-(sp)
+	move.w	d1,d7
+	moveq	#0,d6
+	move.l	d0,d4				* d4 = レコードNo.
+	move.l	d2,d3				* d3 = 残りのバイト数
+	movea.l	a0,a4
+D8B_1:	tst.l	d3
+	ble.s	D8B_OK
+	move.l	d4,d5
+	lsr.l	#4,d5				* d5 = トラックNo.*2+サイド
+	bsr	D8_LDTRK
+	bne.s	D8B_NG
+	move.w	d5,d0
+	lsr.w	#1,d0				* C
+	moveq	#15,d1
+	and.w	d4,d1
+	addq.w	#1,d1				* R
+	bsr	D8_FNDSEC
+	bne.s	D8B_NG
+	bsr	D8_SECLEN
+	cmpi.w	#$0100,d0
+	bcs.s	D8B_NG
+	move.l	#$0100,d0
+	cmp.l	d3,d0
+	bls.s	D8B_2
+	move.l	d3,d0
+D8B_2:	sub.l	d0,d3
+	lea	SH_DATA(a0),a0
+	subq.w	#1,d0
+D8B_3:	move.b	(a0)+,(a4)+
+	dbf	d0,D8B_3
+	addq.l	#1,d4
+	bra.s	D8B_1
+D8B_OK:	movem.l	(sp)+,d1-d7/a0-a4
+	moveq	#0,d0
+	rts
+D8B_NG:	movem.l	(sp)+,d1-d7/a0-a4
+	moveq	#-1,d0
+	rts
+
+
+	.bss
+	.even
+
+D88TYPE:	ds.b	4		* ドライブごとの形式 ($00=2D / $FF=D88)
+W_MODE:	ds.b	1			* 書き込みの種類 (0=1セクタ / 1=m / 2=トラック)
+	.even
+
+TC_DRV:	ds.w	1			* バッファにあるトラックのドライブNo.*4 (-1=なし)
+TC_TRK:	ds.w	1			* バッファにあるトラックNo.*2+サイド
+TC_NSEC:	ds.w	1		* セクタ数
+TC_LIM:	ds.w	1
+TC_OFS:	ds.l	1			* トラックのファイル内の位置
+TC_END:	ds.l	1			* バッファ内のトラックの終わり
+TC_SEC:	ds.l	SECMAX			* セクタヘッダのアドレス
+
+D88TBL:	ds.l	TBLMAX*4		* トラックオフセットテーブル (ドライブごと)
+HDRBUF:	ds.b	HDRSIZ
+TRKBUF:	ds.b	TRKSIZ
+
+	.end
+

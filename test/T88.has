@@ -1,0 +1,217 @@
+* X1D88.has test harness (run68)
+* T.CMD (8 bytes/record: op,cyl,head,tr,scr,fill,param.w) -> T.OUT (16+$1900 bytes/record)
+
+	.cpu	68000
+
+	.xdef	CDRIVE,TRACK,HEAD,FILENO,SCAD
+	.xdef	P_DISK,B_DISK
+	.xdef	A_RDAT,A_WDAT,E_RDST
+
+	.xref	D88INIT,D88OPEN,D88CHK,D88RREC
+	.xref	D88RD,D88RA,D88WC,D88WR
+	.xref	D88TYPE
+
+	.text
+START:
+	jsr	D88INIT
+	clr.w	-(sp)
+	pea	NCMD
+	dc.w	$FF3D
+	addq.l	#6,sp
+	move.w	d0,HCMD
+	move.w	#$20,-(sp)
+	pea	NOUT
+	dc.w	$FF3C
+	addq.l	#6,sp
+	move.w	d0,HOUT
+
+LOOP:
+	move.l	#8,-(sp)
+	pea	CMD
+	move.w	HCMD,-(sp)
+	dc.w	$FF3F
+	lea	10(sp),sp
+	cmpi.l	#8,d0
+	bne	DONE
+
+	lea	B_DISK,a0
+	move.w	#$1900-1,d0
+LPCC:	move.b	#$CC,(a0)+
+	dbf	d0,LPCC
+
+	lea	CMD,a2
+	lea	IOB,a1
+	clr.w	CDRIVE
+	moveq	#0,d0
+	move.b	1(a2),d0
+	swap	d0
+	lsr.l	#3,d0
+	move.l	d0,TRACK
+	clr.w	HEAD
+	tst.b	2(a2)
+	beq.s	SKHD
+	move.w	#$1000,HEAD
+SKHD:	move.b	3(a2),$0FF9(a1)
+	move.b	4(a2),$0FFA(a1)
+	move.b	#$EE,$0FF8(a1)
+	* guard values in registers the hooks must preserve
+	move.l	#$11112222,d2
+	move.l	#$33334444,d6
+	move.l	#$55556666,d7
+	movea.l	#$77778888,a4
+	moveq	#0,d0
+	move.b	(a2),d0
+	add.w	d0,d0
+	add.w	d0,d0
+	jmp	TBL(pc,d0.w)
+TBL:	bra.w	OP0
+	bra.w	OP1
+	bra.w	OP2
+	bra.w	OP3
+	bra.w	OP4
+	bra.w	OP5
+	bra.w	OP6
+	bra.w	OP7
+	bra.w	OP8
+
+OP0:	move.w	#2,-(sp)
+	pea	NIMG
+	dc.w	$FF3D
+	addq.l	#6,sp
+	move.w	d0,FILENO
+	moveq	#0,d1
+	jsr	D88OPEN
+	move.b	d0,d3
+	bra	RESULT
+
+OP1:	move.w	#$00FF,A_RDAT
+	move.w	#$FF00,E_RDST
+	bra.s	RD
+OP2:	move.w	#$0FFF,A_RDAT
+	move.w	#$0010,E_RDST
+	bra.s	RD
+OP3:	move.w	#$18FF,A_RDAT
+	move.w	#$0004,E_RDST
+RD:	jsr	D88RD
+	sne	d3
+	bra	RESULT
+
+OP4:	move.w	#5,A_RDAT
+	clr.w	E_RDST
+	jsr	D88RA
+	sne	d3
+	bra	RESULT
+
+OP5:	move.w	#$00FF,A_WDAT
+	bra.s	WR
+OP6:	move.w	#$0FFF,A_WDAT
+	bra.s	WR
+OP7:	move.w	#$18FF,A_WDAT
+WR:	jsr	D88WC
+	sne	d3
+	bne	RESULT
+	lea	B_DISK,a0
+	move.w	A_WDAT,d1
+	move.b	5(a2),d0
+LPFL:	move.b	d0,(a0)+
+	addq.b	#1,d0
+	dbf	d1,LPFL
+	move.w	A_WDAT,d0
+	jsr	D88WR
+	sne	d3
+	andi.b	#$7F,d3
+	cmp.w	A_WDAT,d0
+	beq	RESULT
+	tst.b	d3
+	bne	RESULT
+	move.b	#$55,d3			* d0 broken on the raw path
+	bra	RESULT
+
+OP8:	move.w	FILENO,d1
+	jsr	D88CHK
+	moveq	#0,d0
+	move.w	6(a2),d0
+	moveq	#0,d2
+	move.b	3(a2),d2
+	lsl.w	#8,d2
+	move.b	4(a2),d2
+	lea	B_DISK,a0
+	move.w	FILENO,d1
+	jsr	D88RREC
+	move.b	d0,d3
+	move.l	#$11112222,d2
+
+RESULT:
+	cmpi.l	#$11112222,d2
+	bne	BROKEN
+	cmpi.l	#$33334444,d6
+	bne	BROKEN
+	cmpi.l	#$55556666,d7
+	bne	BROKEN
+	cmpa.l	#$77778888,a4
+	bne	BROKEN
+	cmpa.l	#IOB,a1
+	bne	BROKEN
+	cmpa.l	#CMD,a2
+	bne	BROKEN
+	lea	RES,a0
+	move.b	(a2),(a0)+
+	move.b	d3,(a0)+
+	move.b	$0FF8(a1),(a0)+
+	move.b	$0FFA(a1),(a0)+
+	move.w	A_RDAT,(a0)+
+	move.w	A_WDAT,(a0)+
+	move.w	P_DISK,(a0)+
+	move.w	E_RDST,(a0)+
+	move.l	D88TYPE,(a0)+
+	move.l	#16,-(sp)
+	pea	RES
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	move.l	#$1900,-(sp)
+	pea	B_DISK
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	bra	LOOP
+
+BROKEN:
+	pea	MSBRK
+	dc.w	$FF09
+	addq.l	#4,sp
+DONE:
+	dc.w	$FF1F
+	dc.w	$FF00
+
+A_RDAT:	dc.w	$00FF
+E_RDST:	dc.w	$0000
+A_WDAT:	dc.w	$00FF
+
+	.data
+NCMD:	dc.b	'T.CMD',0
+NOUT:	dc.b	'T.OUT',0
+NIMG:	dc.b	'T.D88',0
+MSBRK:	dc.b	'REGISTER BROKEN',13,10,0
+	.even
+SCAD:	dc.b	$00
+	.even
+HEAD:	dc.w	$0000
+CDRIVE:	dc.w	$0000
+TRACK:	dcb.l	4,$00000000
+FILENO:	dc.w	$FFFF,$0000
+	dc.w	$FFFF,$0000
+	dc.w	$FFFF,$0000
+	dc.w	$FFFF,$0000
+P_DISK:	dc.w	$FFFF
+
+	.bss
+	.even
+HCMD:	ds.w	1
+HOUT:	ds.w	1
+CMD:	ds.b	8
+RES:	ds.b	16
+B_DISK:	ds.b	$1900
+IOB:	ds.b	$1000
+
+	.end	START

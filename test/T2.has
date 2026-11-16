@@ -1,0 +1,188 @@
+* X1IO.has FDC port test harness (run68)
+* T.CMD (8 bytes/record: op,port,value,0,count.w,0,0) -> T.OUT
+*   op 0: OUT port,value   op 1: IN port x count   op 2: OUT port,value+i x count
+
+	.cpu	68000
+
+	.xdef	A_BAS,T_OPC,T_ROM,A_MEM,A_WOM
+	.xdef	S_CONT,D_CONT,D_KEY,D_CTC,C_CTC,V_KEY,V_CTC
+	.xdef	F_REPT,F_SIFT,F_LOCK,F_KBF,F_PSGSW,F_OPMSW
+	.xdef	TXTY,X1MODE
+
+	.xref	I0F00,O0F00,A_IOB,FD0
+
+	.text
+START:
+	lea	NIMG,a0
+	lea	FD0,a1
+LPNM:	move.b	(a0)+,(a1)+
+	bne.s	LPNM
+
+	clr.w	-(sp)
+	pea	NCMD
+	dc.w	$FF3D
+	addq.l	#6,sp
+	move.w	d0,HCMD
+	move.w	#$20,-(sp)
+	pea	NOUT
+	dc.w	$FF3C
+	addq.l	#6,sp
+	move.w	d0,HOUT
+
+LOOP:
+	move.l	#8,-(sp)
+	pea	CMD
+	move.w	HCMD,-(sp)
+	dc.w	$FF3F
+	lea	10(sp),sp
+	cmpi.l	#8,d0
+	bne	DONE
+	move.w	CMD+4,CNT
+	clr.w	IDX
+	tst.b	CMD
+	beq.s	DO_OUT
+	cmpi.b	#1,CMD
+	beq.s	IN_L
+
+OS_L:	move.w	IDX,d0
+	cmp.w	CNT,d0
+	bcc	LOOP
+	bsr	SETREG
+	move.b	CMD+2,d1
+	add.b	IDX+1,d1
+	jsr	O0F00
+	bsr	CHKREG
+	addq.w	#1,IDX
+	bra.s	OS_L
+
+DO_OUT:	bsr	SETREG
+	move.b	CMD+2,d1
+	jsr	O0F00
+	bsr	CHKREG
+	bra	LOOP
+
+IN_L:	move.w	IDX,d0
+	cmp.w	CNT,d0
+	bcc.s	IN_E
+	bsr	SETREG
+	jsr	I0F00
+	bsr	CHKREG
+	lea	OBUF,a0
+	move.w	IDX,d0
+	move.b	d1,(a0,d0.w)
+	addq.w	#1,IDX
+	bra.s	IN_L
+IN_E:	moveq	#0,d0
+	move.w	CNT,d0
+	move.l	d0,-(sp)
+	pea	OBUF
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	bra	LOOP
+
+SETREG:	moveq	#0,d0
+	moveq	#0,d1
+	move.l	#$00000F00,d5
+	move.b	CMD+1,d5
+	move.l	d5,SVBC
+	move.l	#$11112222,d2
+	move.l	#$33334444,d3
+	move.l	#$55556666,d4
+	move.l	#$77778888,d6
+	move.l	#$9999AAAA,d7
+	movea.l	#$BBBBCCCC,a2
+	movea.l	#$DDDDEEEE,a3
+	movea.l	#$12345678,a4
+	lea	A_IOB,a1
+	lea	A_MEM,a5
+	lea	A_BAS,a6
+	rts
+
+CHKREG:	cmpi.l	#$11112222,d2
+	bne	BROKEN
+	cmpi.l	#$33334444,d3
+	bne	BROKEN
+	cmpi.l	#$55556666,d4
+	bne	BROKEN
+	cmpi.l	#$77778888,d6
+	bne	BROKEN
+	cmpi.l	#$9999AAAA,d7
+	bne	BROKEN
+	cmp.l	SVBC,d5
+	bne	BROKEN
+	cmpa.l	#$BBBBCCCC,a2
+	bne	BROKEN
+	cmpa.l	#$DDDDEEEE,a3
+	bne	BROKEN
+	cmpa.l	#$12345678,a4
+	bne	BROKEN
+	cmpa.l	#A_IOB,a1
+	bne	BROKEN
+	cmpa.l	#A_MEM,a5
+	bne	BROKEN
+	cmpa.l	#A_BAS,a6
+	bne	BROKEN
+	cmpi.l	#$0000FFFF,d0
+	bls.s	CHK1
+	addq.l	#1,WARN0
+CHK1:	cmpi.l	#$000000FF,d1
+	bls.s	CHK2
+	addq.l	#1,WARN1
+CHK2:	rts
+
+BROKEN:
+	pea	MSBRK
+	dc.w	$FF09
+	addq.l	#4,sp
+DONE:
+	move.l	#8,-(sp)
+	pea	WARN0
+	move.w	HOUT,-(sp)
+	dc.w	$FF40
+	lea	10(sp),sp
+	dc.w	$FF1F
+	dc.w	$FF00
+
+A_BAS:	ds.w	1
+
+	.data
+NCMD:	dc.b	'T.CMD',0
+NOUT:	dc.b	'T.OUT',0
+NIMG:	dc.b	'T.IMG',0
+MSBRK:	dc.b	'REGISTER BROKEN',13,10,0
+	.even
+WARN0:	dc.l	0
+WARN1:	dc.l	0
+T_OPC:
+T_ROM:
+A_WOM:
+S_CONT:
+D_CONT:
+D_KEY:
+D_CTC:
+C_CTC:
+V_KEY:
+V_CTC:
+F_REPT:
+F_SIFT:
+F_LOCK:
+F_KBF:
+F_PSGSW:
+F_OPMSW:
+TXTY:
+X1MODE:
+	dcb.l	16,0
+A_MEM:	dcb.l	16,0
+
+	.bss
+	.even
+HCMD:	ds.w	1
+HOUT:	ds.w	1
+CNT:	ds.w	1
+IDX:	ds.w	1
+SVBC:	ds.l	1
+CMD:	ds.b	8
+OBUF:	ds.b	$2000
+
+	.end	START
