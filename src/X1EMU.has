@@ -154,7 +154,7 @@ MSTITL:
 	dc.b	'[m'
  	dc.b	' version 1.00',$0D,$0A
 	dc.b	'Copyright 1993 Koji Morita',$0D,$0A
-	dc.b	'Modified by GORRY(rel2).',$0D,$0A
+	dc.b	'Modified by GORRY(rel4).',$0D,$0A
 	dc.b	0
 
 	.text
