@@ -96,6 +96,7 @@ l1:
 
 	.text
 START:
+	jsr	EXEDIR
 	jsr	SETBLOCK
 	jsr	TITLE
 	jsr	FDINIT
@@ -173,7 +174,7 @@ MSTITL:
 LDROM:
 	bsr	LDX68IPLROM
 	lea	FNIPL,a0
-	jsr	OPEN
+	jsr	ROMOPEN
 *	bmi.w	EROP
 	bmi.w	LDIPLROMT
 	lea	IPLROM,a1
@@ -185,7 +186,7 @@ LDROM:
 	bra	LDIPLROM_OK
 LDIPLROMT:
 	lea	FNIPLT,a0
-	jsr	OPEN
+	jsr	ROMOPEN
 *	bmi.w	EROP
 	bmi.w	LDIPLROM_OK
 	lea	IPLROM,a1
@@ -199,7 +200,7 @@ LDIPLROM_OK:
 
 	bsr	LDX68CGROM
 	lea	FNCG,a0
-	jsr	OPEN
+	jsr	ROMOPEN
 *	bmi.w	EROP
 	bmi.w	LDCGROM_OK
 	lea	CGROM,a1
@@ -270,6 +271,31 @@ LDX68CGROM_lp1:
 
 LDX68CGROM_FNTBUF:
 	ds.b	36
+
+*	X1.x を読んだフォルダの名前を取っておく (起動直後、a0 = メモリ管理ポインタ)
+EXEDIR:
+	movem.l	a0-a1,-(sp)
+	lea	$80(a0),a0			* 実行ファイルのドライブ名とパス名
+	lea	B_EXE,a1
+@@:	move.b	(a0)+,(a1)+
+	bne.s	@b
+	movem.l	(sp)+,a0-a1
+	rts
+
+*	ROM のファイルを X1.x を読んだフォルダから開く (a0 = ファイル名)
+ROMOPEN:
+	move.l	a1,-(sp)
+	pea	(a0)
+	lea	B_EXE,a1
+	lea	B_PATH,a0
+@@:	move.b	(a1)+,(a0)+
+	bne.s	@b
+	subq.l	#1,a0
+	movea.l	(sp)+,a1
+@@:	move.b	(a1)+,(a0)+
+	bne.s	@b
+	movea.l	(sp)+,a1
+	lea	B_PATH,a0
 
 OPEN:
 	move.w	#%0_0_000_00_00,-(sp)
@@ -357,13 +383,18 @@ RTSWT:	rts
 
 SWTCNF:
 	jsr	SKIPSP
-	lea	FNCNF,a0
-	st	(a0)
-	beq.s	SKSWCF
+	beq.s	ERNOCF
 	cmpi.b	#'-',(a2)
-	beq.s	SKSWCF
+	beq.s	ERNOCF
+	lea	FNCNF,a0
 	jsr	COPYFN
-SKSWCF:	jmp	SWTGET
+	jmp	SWTGET
+
+ERNOCF:	lea	MSERNF,a0
+	jmp	ERPRN
+
+MSERNF:	dc.b	'CONFIGファイルが指定されていません',$0D,$0A,0
+	.even
 
 SWTFD:
 	jsr	SKIPSP
@@ -486,11 +517,9 @@ FNCNF:	ds.b	$80
 
 CONFIG:
 	lea	FNCNF,a0
-	lea	(a0),a1
-	move.b	(a1),d0
+	tst.b	(a0)
 	beq.s	CNFDF
-	addq.b	#1,d0
-	beq.s	RTCNF2
+	jsr	CNFSDIR				* a1 = フォルダ名の次 (拡張子はここから探す)
 LPCNF:
 	move.b	(a1)+,d0
 	beq.s	CNFEXT
@@ -525,6 +554,79 @@ CNFGET:
 
 RTCNF:	jsr	CLOSE
 RTCNF2:	rts
+
+
+*	CONFIGファイルのフォルダの名前を B_CDIR に入れる
+*	in	a0 = CONFIGファイルの名前
+*	out	a1 = フォルダ名の次 (ファイル名の先頭)
+CNFSDIR:
+	movem.l	a2-a3,-(sp)
+	lea	(a0),a1
+	lea	(a0),a2
+CSD1:	move.b	(a2)+,d0
+	beq.s	CSD4
+	cmpi.b	#$5C,d0				* '\'
+	beq.s	CSD3
+	cmpi.b	#'/',d0
+	beq.s	CSD3
+	cmpi.b	#':',d0
+	beq.s	CSD3
+	cmpi.b	#$81,d0				* 2バイト文字の 2バイト目は見ない
+	bcs.s	CSD1
+	cmpi.b	#$A0,d0
+	bcs.s	CSD2
+	cmpi.b	#$E0,d0
+	bcs.s	CSD1
+CSD2:	tst.b	(a2)+
+	bne.s	CSD1
+	bra.s	CSD4
+CSD3:	lea	(a2),a1
+	bra.s	CSD1
+CSD4:	lea	(a0),a2
+	lea	B_CDIR,a3
+	bra.s	CSD6
+CSD5:	move.b	(a2)+,(a3)+
+CSD6:	cmpa.l	a1,a2
+	bne.s	CSD5
+	clr.b	(a3)
+	movem.l	(sp)+,a2-a3
+	rts
+
+*	CONFIGファイルに書かれたファイル名を、CONFIGファイルのフォルダから見た名前にする
+*	in	a2 = 書かれたファイル名, a0 = 入れる場所 ($80 バイト)
+*	ドライブ名があればそのまま。'\' で始まるものは、CONFIGファイルのドライブ名だけを付ける
+CNFPATH:
+	movem.l	d0-d1/a0-a1,-(sp)
+	moveq	#$7F,d1				* 入る文字数
+	lea	B_CDIR,a1
+	cmpi.b	#':',1(a2)
+	beq.s	CPA4
+	move.b	(a2),d0
+	cmpi.b	#$5C,d0				* '\'
+	beq.s	CPA1
+	cmpi.b	#'/',d0
+	bne.s	CPA2
+CPA1:	cmpi.b	#':',1(a1)
+	bne.s	CPA4
+	move.b	(a1)+,(a0)+
+	move.b	(a1)+,(a0)+
+	subq.w	#2,d1
+	bra.s	CPA4
+CPA2:	move.b	(a1)+,(a0)+
+	beq.s	CPA3
+	subq.w	#1,d1
+	bra.s	CPA2
+CPA3:	subq.l	#1,a0
+CPA4:	move.b	(a2)+,(a0)+
+	beq.s	CPA5
+	dbra	d1,CPA4
+	bra.w	ERCNF				* 長すぎる
+CPA5:	movem.l	(sp)+,d0-d1/a0-a1
+	rts
+
+B_EXE:	ds.b	$80				* X1.x を読んだフォルダ
+B_CDIR:	ds.b	$80				* CONFIGファイルのフォルダ
+B_PATH:	ds.b	$80				* 開くファイルの名前
 
 
 CNFANA:
@@ -564,7 +666,7 @@ BRCFAN:
 	bne.w	ERCNF
 	jsr	SKIPSP
 	beq.w	ERCNF
-	jmp	COPYFN2
+	jmp	CNFPATH
 CNFTBL:
 	lea	CHRCNF,a0
 LPCFA2:	movea.l	(a0)+,a1
@@ -610,7 +712,7 @@ CNFCFD:
 	tst.b	(a1,d0.l)
 
 	bne.s	RTCFFD
-	jsr	COPYFN2
+	jsr	CNFPATH
 RTCFFD:	rts
 
 CNFDSP:
@@ -668,7 +770,8 @@ CNFROM:
 	move.l	d0,P_ROM
 
 	move.w	d2,-(sp)
-	lea	(a2),a0
+	lea	B_PATH,a0
+	jsr	CNFPATH
 	jsr	OPEN
 	bmi.w	EROP
 
@@ -722,7 +825,9 @@ RTCFTK:	rts
 CNFCNF:
 	tst.l	(sp)+
 	jsr	CLOSE
-	lea	(a2),a0
+	lea	B_PATH,a0
+	jsr	CNFPATH
+	jsr	CNFSDIR				* 以後は、このファイルのフォルダから見る
 	jsr	OPEN
 	bmi.w	EROP
 	jmp	CNFGET
