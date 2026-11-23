@@ -51,8 +51,50 @@ def mk(tracks, hdr=0x2B0, prot=0, kind=0):
     return head[:hdr] + body
 
 
-def run(img, cmds):
+def fmt(secs, fm=False, gap3=54, cut=False):
+    """[(c,h,r,n,mark,data)] -> ライトトラックで FDC に渡すデータ ($1900 バイト)。data が None なら ID だけ"""
+    if fm:
+        b = b"\xFF" * 40 + bytes(6) + b"\xFC" + b"\xFF" * 26
+    else:
+        b = b"\x4E" * 80 + bytes(12) + b"\xF6" * 3 + b"\xFC" + b"\x4E" * 50
+    for (c, h, r, n, mark, data) in secs:
+        if fm:
+            b += bytes(6) + bytes([0xFE, c, h, r, n, 0xF7]) + b"\xFF" * 11
+            if data is not None:
+                b += bytes(6) + bytes([mark]) + data + b"\xF7" + b"\xFF" * gap3
+        else:
+            b += bytes(12) + b"\xF5" * 3 + bytes([0xFE, c, h, r, n, 0xF7]) + b"\x4E" * 22
+            if data is not None:
+                b += bytes(12) + b"\xF5" * 3 + bytes([mark]) + data + b"\xF7" + b"\x4E" * gap3
+    assert cut or len(b) <= 0x1900, len(b)
+    return b[:0x1900].ljust(0x1900, b"\xFF" if fm else b"\x4E")
+
+
+def trk(secs, dens=0):
+    """[(c,h,r,n,del,data)] -> D88 のトラック"""
+    return b"".join(struct.pack("<BBBBHBBB5xH", c, h, r, n, len(secs), dens, dl, 0, len(data)) + data
+                    for (c, h, r, n, dl, data) in secs)
+
+
+def apply(img, t, new):
+    """img のトラック t を new に置き換えたイメージ (後ろをずらし、テーブルとディスクサイズを直す)"""
+    size = struct.unpack_from("<I", img, 0x1C)[0]
+    offs = list(struct.unpack_from("<164I", img, 0x20))
+    n = 160 if min(o for o in offs[:160] if o) < 0x2B0 else 164
+    offs[n:] = [0] * (164 - n)
+    pos = offs[t] or size
+    nxt = min([o for o in offs if o > pos] + [size])
+    delta = len(new) - (nxt - pos)
+    body = img[:pos] + new + img[nxt:]
+    offs = [o + delta if o > pos else o for o in offs]
+    offs[t] = pos
+    head = body[:0x1C] + struct.pack("<I", size + delta) + struct.pack("<%dI" % n, *offs[:n])
+    return head + body[len(head):]
+
+
+def run(img, cmds, wtk=()):
     open("T.D88", "wb").write(img)
+    open("T.WTK", "wb").write(b"".join(wtk))
     open("T.CMD", "wb").write(b"".join(struct.pack(">6BH", *c) for c in cmds))
     if os.path.exists("T.OUT"):
         os.remove("T.OUT")
@@ -130,13 +172,13 @@ cmds = [(0, 0, 0, 0, 0, 0, 0),
         (5, 3, 1, 3, 17, 0x10, 0),     # ない
         (6, 8, 0, 8, 15, 0x80, 0),     # m: 15,16
         (6, 8, 1, 8, 1, 0x33, 0),      # m: 1-16
-        (7, 5, 0, 5, 1, 0, 0),         # トラック
-        (7, 50, 0, 50, 1, 0, 0),       # ないトラック
+        (9, 5, 0, 5, 1, 0, 0),         # トラック (同じ構成、データは $FF)
+        (7, 82, 0, 82, 1, 0, 0),       # テーブルにないトラック
         (1, 3, 1, 3, 5, 0, 0),
         (8, 0, 0, 0, 32, 0, 0),        # RREC 0, 32バイト
         (8, 0, 0, 3, 0xE8, 0, 37),     # RREC 37, 1000バイト
         (8, 0, 0, 1, 0, 0, 1280)]      # 範囲外
-res, after = run(imgA, cmds)
+res, after = run(imgA, cmds, [fmt([(5, 0, r, 1, 0xFB, b"\xFF" * 256) for r in range(1, 17)])])
 exp = bytearray(imgA)
 tr = parse(imgA)
 
@@ -240,5 +282,130 @@ t = mk({0: [(0, 0, 1, 1, 0, 0, d(256, 1)), (0, 0, 2, 1, 0, 0, d(256, 2))]})
 t = bytearray(t[:-100]); struct.pack_into("<I", t, 0x1C, len(t))
 res, _ = run(bytes(t), [(0, 0, 0, 0, 0, 0, 0), (1, 0, 0, 0, 1, 0, 0), (1, 0, 0, 0, 2, 0, 0)])
 check("E cut sector", res[0]["typ"] == 0xFF000000 and res[1]["st"] == 3 and res[2]["st"] == 0x10, [x["st"] for x in res])
+
+# ---- F: ライトトラック (フォーマット)。セクタの構成を変える
+pd = lambda r, n: bytes((r * 17 + i * 5) & 255 for i in range(n))
+OPEN = (0, 0, 0, 0, 0, 0, 0)
+
+
+def wt(c, h, k):
+    return (9, c, h, c, 1, 0, k)
+
+
+def rd(c, h, r):
+    return (1, c, h, c, r, 0, 0)
+
+
+def geo(c, h, n, count, mark=0xFB, order=None):
+    """(ライトトラックのデータ, D88 のトラック)"""
+    rs = order or list(range(1, count + 1))
+    size = 128 << n
+    return (fmt([(c, h, r, n, mark, pd(r, size)) for r in rs]),
+            trk([(c, h, r, n, 0x10 if mark == 0xF8 else 0, pd(r, size)) for r in rs]))
+
+
+def fcheck(name, after, exp, maxlen=None):
+    # run68x は大きさ 0 の _WRITE でファイルを切り詰めないので、縮めたあとは後ろにごみが残る
+    check(name + " file", after[:len(exp)] == exp, (len(after), len(exp), sum(a != b for a, b in zip(after, exp))))
+    check(name + " size", len(after) == (maxlen or len(exp)), (len(after), maxlen or len(exp)))
+
+
+def okw(r):
+    return r["ret"] == 0x7F and r["st"] == 0 and r["wdat"] == 0x18FF
+
+
+def okr(r, data):
+    return r["st"] == 3 and r["rdat"] == len(data) - 1 and r["buf"][:len(data)] == data
+
+
+# 同じ構成で、データだけ変える (ファイルの大きさもヘッダも変わらない)
+w1, t1 = geo(5, 0, 1, 16)
+res, after = run(imgA, [OPEN, wt(5, 0, 0), rd(5, 0, 7), rd(6, 0, 3)], [w1])
+exp = apply(imgA, 10, t1)
+fcheck("F same", after, exp)
+check("F same header", after[:0x2B0] == imgA[:0x2B0] and len(after) == len(imgA))
+check("F same res", okw(res[1]) and okr(res[2], pd(7, 256)) and okr(res[3], rawsec(6, 0, 3)), [(x["ret"], x["st"]) for x in res])
+
+# 大きくなる・もう一度大きくなる・小さくなる (後ろのトラックがずれる)
+w2, t2 = geo(5, 0, 2, 9)
+w3, t3 = geo(5, 0, 3, 5)
+w4, t4 = geo(5, 0, 1, 8, order=[1, 5, 2, 6, 3, 7, 4, 8])
+res, after = run(imgA, [OPEN, rd(39, 1, 16),
+                        wt(5, 0, 0), rd(5, 0, 9), rd(39, 1, 16), rd(5, 1, 2), rd(4, 1, 16),
+                        wt(5, 0, 1), rd(5, 0, 5), rd(39, 1, 1),
+                        wt(5, 0, 2), rd(5, 0, 8), rd(5, 0, 9), rd(39, 1, 16), rd(5, 1, 1), rd(0, 0, 1)], [w2, w3, w4])
+e2 = apply(imgA, 10, t2)
+e3 = apply(e2, 10, t3)
+e4 = apply(e3, 10, t4)
+check("F resize lens", len(e2) == len(imgA) + 400 and len(e3) == len(e2) + 448 and len(e4) == len(imgA) - 2176, (len(e2), len(e3), len(e4)))
+fcheck("F resize", after, e4, len(e3))
+check("F resize size field", struct.unpack_from("<I", after, 0x1C)[0] == len(e4))
+check("F resize parse", [(x["r"], x["size"]) for x in parse(after[:len(e4)])[10]] == [(r, 256) for r in [1, 5, 2, 6, 3, 7, 4, 8]]
+      and parse(after[:len(e4)])[79][15]["data"] == rawsec(39, 1, 16))
+check("F resize res", okw(res[2]) and okr(res[3], pd(9, 512)) and okr(res[4], rawsec(39, 1, 16)) and okr(res[5], rawsec(5, 1, 2))
+      and okr(res[6], rawsec(4, 1, 16)) and okw(res[7]) and okr(res[8], pd(5, 1024)) and okr(res[9], rawsec(39, 1, 1))
+      and okw(res[10]) and okr(res[11], pd(8, 256)) and res[12]["st"] == 0x10 and okr(res[13], rawsec(39, 1, 16))
+      and okr(res[14], rawsec(5, 1, 1)) and okr(res[15], rawsec(0, 0, 1)), [(x["ret"], x["st"]) for x in res])
+
+# フォーマットされていないトラック (ディスクの終わりに足す)、テーブルの最後、テーブルの外
+w5, t5 = geo(50, 0, 1, 16)
+w6, t6 = geo(41, 1, 3, 5)
+w7, t7 = geo(81, 1, 0, 3)
+res, after = run(imgA, [OPEN, rd(50, 0, 3), wt(50, 0, 0), rd(50, 0, 3), wt(41, 1, 1), rd(41, 1, 5), rd(50, 0, 16),
+                        wt(81, 1, 2), rd(81, 1, 2), wt(82, 0, 2), rd(39, 1, 16)], [w5, w6, w7])
+exp = apply(apply(apply(imgA, 100, t5), 83, t6), 163, t7)
+fcheck("F new", after, exp)
+check("F new res", res[1]["st"] == 0x10 and okw(res[2]) and okr(res[3], pd(3, 256)) and okw(res[4]) and okr(res[5], pd(5, 1024))
+      and okr(res[6], pd(16, 256)) and okw(res[7]) and okr(res[8], pd(2, 128))
+      and res[9]["ret"] == 0xFF and res[9]["st"] == 0x20 and okr(res[10], rawsec(39, 1, 16)), [(x["ret"], x["st"]) for x in res])
+
+# 最後のトラック (後ろにずらすものがない)
+w8, t8 = geo(39, 1, 2, 9)
+res, after = run(imgA, [OPEN, wt(39, 1, 0), rd(39, 1, 9), rd(39, 0, 16)], [w8])
+fcheck("F last", after, apply(imgA, 79, t8))
+check("F last res", okw(res[1]) and okr(res[2], pd(9, 512)) and okr(res[3], rawsec(39, 0, 16)), [(x["ret"], x["st"]) for x in res])
+
+# テーブルが 160 個のイメージ (テーブルのすぐ後ろのトラックを壊さない)。160 番めからはテーブルの外
+w9, t9 = geo(0, 0, 1, 16)
+wa, ta = geo(1, 0, 2, 9)
+res, after = run(imgB, [OPEN, wt(0, 0, 0), rd(0, 0, 16), rd(1, 1, 2), rd(79, 1, 1), wt(1, 0, 1), rd(1, 0, 9), rd(79, 1, 1),
+                        wt(80, 0, 0), rd(1, 1, 1)], [w9, wa])
+exp = apply(apply(imgB, 0, t9), 2, ta)
+fcheck("F 160", after, exp)
+check("F 160 res", okw(res[1]) and okr(res[2], pd(16, 256)) and okr(res[3], d(256, 11)) and okr(res[4], d(256, 12)) and okw(res[5])
+      and okr(res[6], pd(9, 512)) and okr(res[7], d(256, 12)) and res[8]["ret"] == 0xFF and res[8]["st"] == 0x20
+      and okr(res[9], d(256, 10)), [(x["ret"], x["st"]) for x in res])
+
+# ID がひとつもないデータ (Write Fault、ファイルは変わらない)
+res, after = run(imgA, [OPEN, rd(5, 0, 1), wt(5, 0, 0), rd(5, 0, 1), wt(60, 0, 0), rd(60, 0, 1)], [b"\x4E" * 0x1900])
+check("F no id", after == imgA and res[2]["ret"] == 0x7F and res[2]["st"] == 0x20 and okr(res[3], rawsec(5, 0, 1))
+      and res[4]["st"] == 0x20 and res[5]["st"] == 0x10, [(x["ret"], x["st"]) for x in res])
+
+# 削除マーク、データのない ID、N が 4 以上、途中で切れたセクタ
+wb = fmt([(7, 0, 1, 1, 0xFB, pd(1, 256)), (7, 0, 2, 1, 0xF8, pd(2, 256)), (7, 0, 3, 1, 0xFB, None), (7, 0, 4, 5, 0xFB, pd(4, 256)),
+          (7, 0, 5, 3, 0xFB, pd(5, 1024)), (7, 0, 6, 3, 0xFB, pd(6, 1024)), (7, 0, 7, 3, 0xFB, pd(7, 1024)),
+          (7, 0, 8, 3, 0xFB, pd(8, 1024)), (7, 0, 9, 3, 0xFB, pd(9, 1024)), (7, 0, 10, 3, 0xFB, pd(10, 1024))], cut=True)
+tb = trk([(7, 0, 1, 1, 0, pd(1, 256)), (7, 0, 2, 1, 0x10, pd(2, 256)), (7, 0, 4, 5, 0, pd(4, 256))]
+         + [(7, 0, r, 3, 0, pd(r, 1024)) for r in (5, 6, 7, 8)])
+res, after = run(imgA, [OPEN, wt(7, 0, 0), rd(7, 0, 2), rd(7, 0, 3), rd(7, 0, 4), rd(7, 0, 8), rd(7, 0, 9)], [wb])
+fcheck("F marks", after, apply(imgA, 14, tb))
+check("F marks res", okw(res[1]) and okr(res[2], pd(2, 256)) and res[2]["erd"] == 0xFF20 and res[3]["st"] == 0x10
+      and okr(res[4], pd(4, 256)) and res[4]["erd"] == 0xFF00 and okr(res[5], pd(8, 1024)) and res[6]["st"] == 0x10,
+      [(x["ret"], x["st"], hex(x["erd"])) for x in res])
+
+# 単密度 (ID の前に $F5 がない)
+wc = fmt([(2, 1, r, 0, 0xFB, pd(r, 128)) for r in range(1, 17)], fm=True, gap3=27)
+tc = trk([(2, 1, r, 0, 0, pd(r, 128)) for r in range(1, 17)], dens=0x40)
+res, after = run(imgA, [OPEN, wt(2, 1, 0), rd(2, 1, 16), rd(2, 0, 1)], [wc])
+fcheck("F fm", after, apply(imgA, 5, tc), len(imgA))
+check("F fm res", okw(res[1]) and okr(res[2], pd(16, 128)) and okr(res[3], rawsec(2, 0, 1)), [(x["ret"], x["st"]) for x in res])
+
+# 複数枚のイメージ (2 枚めもいっしょにずれる)
+res, after = run(imgD, [OPEN, wt(5, 0, 0), rd(5, 0, 9), wt(5, 0, 1), rd(5, 0, 8), rd(39, 1, 16)], [w2, w4])
+ed = apply(imgD, 10, t2)
+check("F multi tail", ed[len(imgA) + 400:] == imgD[len(imgA):])
+fcheck("F multi", after, apply(ed, 10, t4), len(ed))
+check("F multi res", okw(res[1]) and okr(res[2], pd(9, 512)) and okw(res[3]) and okr(res[4], pd(8, 256))
+      and okr(res[5], rawsec(39, 1, 16)), [(x["ret"], x["st"]) for x in res])
 
 print("FAILS", fails)

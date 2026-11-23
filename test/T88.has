@@ -1,5 +1,6 @@
 * X1D88.has test harness (run68)
 * T.CMD (8 bytes/record: op,cyl,head,tr,scr,fill,param.w) -> T.OUT (16+$1900 bytes/record)
+*   op 9: write track with the data at T.WTK ($1900 bytes/record, record No. = param)
 
 	.cpu	68000
 
@@ -31,6 +32,11 @@ START:
 	dc.w	$FF3C
 	addq.l	#6,sp
 	move.w	d0,HOUT
+	clr.w	-(sp)
+	pea	NWTK
+	dc.w	$FF3D
+	addq.l	#6,sp
+	move.w	d0,HWTK
 
 LOOP:
 	move.l	#8,-(sp)
@@ -80,6 +86,7 @@ TBL:	bra.w	OP0
 	bra.w	OP6
 	bra.w	OP7
 	bra.w	OP8
+	bra.w	OP9
 
 OP0:	move.w	#2,-(sp)
 	pea	NIMG
@@ -123,7 +130,7 @@ WR:	jsr	D88WC
 LPFL:	move.b	d0,(a0)+
 	addq.b	#1,d0
 	dbf	d1,LPFL
-	move.w	A_WDAT,d0
+WR2:	move.w	A_WDAT,d0
 	jsr	D88WR
 	sne	d3
 	andi.b	#$7F,d3
@@ -133,6 +140,25 @@ LPFL:	move.b	d0,(a0)+
 	bne	RESULT
 	move.b	#$55,d3			* d0 broken on the raw path
 	bra	RESULT
+
+OP9:	move.w	#$18FF,A_WDAT
+	jsr	D88WC
+	sne	d3
+	bne	RESULT
+	moveq	#0,d0
+	move.w	6(a2),d0
+	mulu	#$1900,d0
+	clr.w	-(sp)
+	move.l	d0,-(sp)
+	move.w	HWTK,-(sp)
+	dc.w	$FF42
+	addq.l	#8,sp
+	move.l	#$1900,-(sp)
+	pea	B_DISK
+	move.w	HWTK,-(sp)
+	dc.w	$FF3F
+	lea	10(sp),sp
+	bra	WR2
 
 OP8:	move.w	FILENO,d1
 	jsr	D88CHK
@@ -199,6 +225,7 @@ A_WDAT:	dc.w	$00FF
 NCMD:	dc.b	'T.CMD',0
 NOUT:	dc.b	'T.OUT',0
 NIMG:	dc.b	'T.D88',0
+NWTK:	dc.b	'T.WTK',0
 MSBRK:	dc.b	'REGISTER BROKEN',13,10,0
 	.even
 SCAD:	dc.b	$00
@@ -216,6 +243,7 @@ P_DISK:	dc.w	$FFFF
 	.even
 HCMD:	ds.w	1
 HOUT:	ds.w	1
+HWTK:	ds.w	1
 CMD:	ds.b	8
 RES:	ds.b	16
 B_DISK:	ds.b	$1900

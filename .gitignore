@@ -4,7 +4,10 @@
 *.x
 *.map
 *.zip
+/package/
 err.err
+/test/work/
+SRC.LZH
 
 # エディタなどが残すバックアップ
 *.bak
@@ -15,6 +18,7 @@ IPLROM.X1T
 CGROM.X1
 
 # ディスクイメージ
+/img/
 *.d88
 *.D88
 *.2d

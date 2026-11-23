@@ -58,6 +58,13 @@ class Script:
         self.outs(0xFB, fill, n)
         self.inp(0xF8, 1, tag + " st1")
 
+    def wrtrk(self, data, tag=""):
+        self.out(0xFA, 1); self.out(0xF8, 0xF0)
+        self.inp(0xF8, 1, tag + " st0")
+        for b in data:
+            self.out(0xFB, b)
+        self.inp(0xF8, 1, tag + " st1")
+
     def readid(self, tag=""):
         self.out(0xF8, 0xC0); self.inp(0xF8, 1, tag + " st0"); self.inp(0xFB, 6, tag + " id"); self.inp(0xF8, 1, tag + " st1")
 
@@ -77,6 +84,15 @@ def run(exe, img, sc):
     warn = struct.unpack(">II", out[p:p + 8]) if len(out) == p + 8 else None
     check("output size " + exe, warn is not None, (len(out), p))
     return res, warn, open("T.IMG", "rb").read()
+
+
+def fmt(c, h, fill):
+    """16 セクタ・256 バイトのフォーマットで FDC に渡すデータ ($1900 バイト)"""
+    b = b"\x4E" * 80 + bytes(12) + b"\xF6" * 3 + b"\xFC" + b"\x4E" * 50
+    for r in range(1, 17):
+        b += bytes(12) + b"\xF5" * 3 + bytes([0xFE, c, h, r, 1, 0xF7]) + b"\x4E" * 22
+        b += bytes(12) + b"\xF5" * 3 + b"\xFB" + bytes([fill]) * 256 + b"\xF7" + b"\x4E" * 54
+    return b.ljust(0x1900, b"\x4E")
 
 
 def d88toraw(img):
@@ -109,7 +125,7 @@ def scenario(common_only):
     s.select(0); s.seek(9); s.read(1, n=4096, cmd=0xE0, tag="rdtrk", poll=False); s.inp(0xFB, 0x900, "rdtrk rest"); s.inp(0xF8, 1, "rdtrk end")
     s.select(1); s.seek(3); s.write(5, 0x10, tag="wr"); s.read(5, tag="wr reread")
     s.select(0); s.seek(8); s.write(1, 0x33, n=4096, cmd=0xB0, tag="wrm"); s.read(16, tag="wrm reread")
-    s.select(0); s.seek(6); s.write(1, 0x00, n=0x1900, cmd=0xF0, tag="wrtrk"); s.read(7, tag="wrtrk reread")
+    s.select(0); s.seek(6); s.wrtrk(fmt(6, 0, 0xFF), tag="wrtrk"); s.read(7, tag="wrtrk reread")
     s.select(0, motor=0); s.inp(0xF8, 1, "motor off st")
     s.select(1); s.seek(20); s.read(9, tag="again")
     # 中断 (FORCE INTERRUPT) のあとのリード
@@ -122,7 +138,7 @@ def scenario(common_only):
             s.readid("id")
         s.select(0); s.seek(4); s.read(17, tag="rnf"); s.write(17, 0, tag="wr rnf")
         s.select(0); s.seek(45); s.read(1, tag="rd cyl45"); s.readid("id cyl45")
-        s.out(0xFA, 1); s.out(0xF8, 0xF0); s.inp(0xF8, 1, "wrtrk cyl45")
+        s.wrtrk(fmt(45, 0, 0xE5), tag="wrtrk cyl45"); s.read(3, tag="rd cyl45 new"); s.select(1); s.seek(39); s.read(16, tag="rd last")
         s.select(0); s.seek(10); s.out(0xF9, 11); s.read(1, tag="tr mismatch"); s.out(0xF9, 10); s.read(1, tag="tr match")
     return s
 
@@ -148,13 +164,18 @@ for k in rn:
     check("d88 = raw: " + k, rd[k][:len(rn[k])] == rn[k], (rd[k][0][:8], rn[k][0][:8]))
 check("d88 rdtrk rest", rd["rdtrk rest"][0] == bytes(0x900) and rd["rdtrk end"] == [b"\x04"], rd["rdtrk end"])
 check("d88 file = raw file", d88toraw(fd) == fn, sum(a != b for a, b in zip(d88toraw(fd), fn)))
-check("d88 header kept", fd[:0x2B0] == d88[:0x2B0] and len(fd) == len(d88))
+# シリンダ 45 をフォーマットしたので、トラック 90 がディスクの終わりに足されている
+hd = bytearray(d88[:0x2B0]); struct.pack_into("<I", hd, 0x1C, len(d88) + 16 * 272); struct.pack_into("<I", hd, 0x20 + 90 * 4, len(d88))
+check("d88 header", fd[:0x2B0] == bytes(hd) and len(fd) == len(d88) + 16 * 272, (len(fd), len(d88)))
+check("d88 new track", fd[len(d88):] == b"".join(struct.pack("<BBBBHBBB5xH", 45, 0, r, 1, 16, 0, 0, 0, 256) + b"\xE5" * 256 for r in range(1, 17)))
 ids = rd["id id"]
 check("d88 id", sorted(x[2] for x in ids[:16]) == list(range(1, 17)) and all(x[0] == 12 and x[1] == 1 and x[3] == 1 for x in ids)
       and ids[16] == ids[0] and all(x == b"\x03" for x in rd["id st0"]) and all(x == b"\x00" for x in rd["id st1"]), ids[:3])
 check("d88 rnf", rd["rnf st0"] == [b"\x10"] and rd["wr rnf st0"] == [b"\x10"], (rd["rnf st0"], rd["wr rnf st0"]))
-check("d88 cyl45", rd["rd cyl45 st0"] == [b"\x10"] and rd["id cyl45 st0"] == [b"\x10"] and rd["wrtrk cyl45"] == [b"\x20"],
-      (rd["rd cyl45 st0"], rd["id cyl45 st0"], rd["wrtrk cyl45"]))
+check("d88 cyl45", rd["rd cyl45 st0"] == [b"\x10"] and rd["id cyl45 st0"] == [b"\x10"] and rd["wrtrk cyl45 st0"] == [b"\x03"]
+      and rd["wrtrk cyl45 st1"] == [b"\x00"] and rd["rd cyl45 new st0"] == [b"\x03"] and rd["rd cyl45 new data"] == [b"\xE5" * 256]
+      and rd["rd last data"] == [raw[39 * 0x2000 + 0x1F00:][:256]],
+      (rd["rd cyl45 st0"], rd["id cyl45 st0"], rd["wrtrk cyl45 st0"], rd["wrtrk cyl45 st1"], rd["rd cyl45 new st0"]))
 check("d88 tr", rd["tr mismatch st0"] == [b"\x10"] and rd["tr match st0"] == [b"\x03"]
       and rd["tr match data"][0] == raw[10 * 0x2000:][:256], (rd["tr mismatch st0"], rd["tr match st0"]))
 

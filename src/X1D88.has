@@ -146,6 +146,8 @@ D8O_L4:	cmp.l	(a1)+,d4
 	dbf	d2,D8O_L4
 
 	st	(a2)				* D88形式
+	lea	D88SIZ,a1
+	move.l	d4,(a1,d6.w)			* ディスクの大きさ
 	moveq	#0,d0
 	cmpi.b	#$10,HDRBUF+$1A
 	bne.s	D8O_RT
@@ -508,10 +510,10 @@ D88WC:
 	bsr	D8_SETDRV
 	beq	D8W_OK
 	move.w	A_WDAT,d4
-	bsr	D8_LDTRK
-	bne	D8W_NG
 	cmpi.w	#$1900-1,d4
-	beq.s	D8W_TRK
+	beq	D8W_TRK
+	bsr	D8_LDTRK
+	bne	D8W_RNF
 	move.b	$0FFA(a1),d5			* d5 = SCR
 	cmpi.w	#$1000-1,d4
 	beq.s	D8W_MUL
@@ -551,14 +553,18 @@ D8W_SET:
 	bra.s	D8W_OK
 
 D8W_TRK:					* ライトトラック
+	tst.w	d7
+	bmi.s	D8W_NG
+	bsr	D8_TBLADR
+	bsr	D8_TBLN
+	cmp.w	d0,d5				* テーブルにないトラック
+	bcc.s	D8W_NG
 	move.b	#2,W_MODE
 D8W_OK:	movem.l	(sp)+,d2-d7/a0/a2-a4
 	moveq	#0,d0
 	rts
 
-D8W_NG:	cmpi.w	#$1900-1,d4
-	bne.s	D8W_RNF
-	move.b	#%00100000,$0FF8(a1)		* Write Fault
+D8W_NG:	move.b	#%00100000,$0FF8(a1)		* Write Fault
 	bra.s	D8W_ER
 D8W_RNF:
 	move.b	#%00010000,$0FF8(a1)		* Record Not Found
@@ -579,38 +585,16 @@ D88WR:
 	movem.l	d0-d7/a0/a2-a4,-(sp)
 	bsr	D8_SETDRV
 	beq	D8X_RAW
+	cmpi.b	#2,W_MODE
+	beq	D8X_TRK
 	bsr	D8_LDTRK
 	bne	D8X_ERR
 	lea	B_DISK,a2
 	moveq	#0,d3
 	move.w	A_WDAT,d3
 	addq.l	#1,d3				* d3 = 受け取ったバイト数
-	move.b	W_MODE,d4
-	beq.s	D8X_SGL
-	subq.b	#1,d4
-	beq.s	D8X_MUL
-
-	lea	TC_SEC,a3			* ライトトラック
-	move.w	TC_NSEC,d5
-	subq.w	#1,d5
-D8X_T1:	movea.l	(a3)+,a0
-	clr.b	SH_DEL(a0)
-	clr.b	SH_STAT(a0)
-	bsr	D8_SECLEN
-	beq.s	D8X_T3
-	lea	SH_DATA(a0),a0
-	subq.w	#1,d0
-D8X_T2:	st	(a0)+
-	dbf	d0,D8X_T2
-D8X_T3:	dbf	d5,D8X_T1
-	lea	TRKBUF,a0
-	move.l	TC_OFS,d1
-	move.l	TC_END,d2
-	sub.l	a0,d2
-	bsr	D8_FWRITE
-	bne.s	D8X_ERR
-	moveq	#%00000000,d2
-	bra.s	D8X_ST
+	tst.b	W_MODE
+	bne.s	D8X_MUL
 
 D8X_SGL:					* ライトデータ
 	move.b	$0FF9(a1),d0
@@ -648,6 +632,9 @@ D8X_RAW:
 	movem.l	(sp)+,d0-d7/a0/a2-a4
 	cmp.w	d0,d0
 	rts
+D8X_TRK:					* ライトトラック
+	bsr	D8_FORMAT
+	bra	D8X_ST
 
 
 *	(a2)+ のデータを a0 のセクタに書く
@@ -704,6 +691,288 @@ D8_FWRITE:
 	moveq	#0,d0
 	rts
 D8Z_NG:	moveq	#-1,d0
+	rts
+
+
+*	ファイルの d1.l の位置から d2.l バイトを、a0 に読む
+*	in	d7.w = ファイルハンドル
+*	out	d0.l = 0 / -1 (読めない)
+
+D8_FREAD:
+	clr.w	-(sp)				* MODE = 0 (先頭からのOFFSET)
+	move.l	d1,-(sp)
+	move.w	d7,-(sp)
+	dc.w	$FF42						* DOS _SEEK
+	addq.l	#8,sp
+	tst.l	d0
+	bmi.s	D8Z_NG
+	move.l	d2,-(sp)
+	move.l	a0,-(sp)
+	move.w	d7,-(sp)
+	dc.w	$FF3F						* DOS _READ
+	lea	10(sp),sp
+	cmp.l	d2,d0
+	bne.s	D8Z_NG
+	moveq	#0,d0
+	rts
+
+
+*	d0.l を４バイトのLEの値として (a0)+ に書く
+
+D8_PUTLE:
+	move.b	d0,(a0)+
+	ror.l	#8,d0
+	move.b	d0,(a0)+
+	ror.l	#8,d0
+	move.b	d0,(a0)+
+	ror.l	#8,d0
+	move.b	d0,(a0)+
+	ror.l	#8,d0
+	rts
+
+
+*	a3 のトラックオフセットテーブルの、ファイル上の個数を d0.w に得る
+*	(HDRSIZ より前にトラックがあれば160個)
+
+D8_TBLN:
+	movem.l	d1/a0,-(sp)
+	movea.l	a3,a0
+	move.w	#TBLMAX,d0
+	move.w	#TBLMAX-1,d1
+D8N_1:	tst.l	(a0)
+	beq.s	D8N_2
+	cmpi.l	#HDRSIZ,(a0)
+	bcc.s	D8N_2
+	move.w	#TBLMAX-4,d0
+D8N_2:	addq.l	#4,a0
+	dbf	d1,D8N_1
+	movem.l	(sp)+,d1/a0
+	rts
+
+
+*---------------------------------------*
+*     ライトトラック (フォーマット)	*
+*---------------------------------------*
+*	B_DISK に受け取ったデータからセクタを取り出し、
+*	トラックを作り直してファイルに書く
+*	トラックの大きさが変わるときは、ファイルの後ろをずらす
+*	in	d5.w = トラックNo.*2+サイド
+*		d6.w = ドライブNo.*4
+*		d7.w = ファイルハンドル
+*	out	d2.b = ステータス			(d0,d1 破壊)
+
+D8_FORMAT:
+	movem.l	d3-d7/a0-a4,-(sp)
+	move.w	#-1,TC_DRV			* トラックバッファ無効
+	lea	B_DISK,a2			* a2 = 受け取ったデータ
+	lea	BUFSIZ(a2),a4			* a4 = その終わり
+	lea	TRKBUF,a0			* a0 = 作るトラック
+	lea	TC_SEC,a3
+	moveq	#0,d4				* d4 = セクタ数
+DF_ID:	cmpa.l	a4,a2
+	bcc	DF_END
+	cmpi.b	#$FE,(a2)+			* ＩＤアドレスマーク
+	bne.s	DF_ID
+DF_ID2:	moveq	#$00,d3				* d3 = 密度 ($00=倍密度)
+	cmpi.b	#$F5,-2(a2)
+	beq.s	DF_ID3
+	moveq	#$40,d3				* $40=単密度
+DF_ID3:	movea.l	a2,a1				* a1 = C,H,R,N
+	addq.l	#4,a2
+DF_DM:	cmpa.l	a4,a2
+	bcc.s	DF_END
+	move.b	(a2)+,d0
+	cmpi.b	#$FE,d0				* データのないＩＤは捨てる
+	beq.s	DF_ID2
+	subi.b	#$F8,d0				* データマーク ($F8-$FB)
+	cmpi.b	#$FB-$F8,d0
+	bhi.s	DF_DM
+	tst.b	d0
+	seq	d1
+	andi.b	#$10,d1				* d1 = 削除フラグ ($F8)
+	moveq	#3,d0
+	and.b	3(a1),d0
+	moveq	#64,d2
+	add.w	d2,d2
+	lsl.w	d0,d2				* d2 = データの大きさ (128<<N)
+	move.l	a4,d0
+	sub.l	a2,d0
+	cmp.l	d2,d0				* 途中で切れているセクタは捨てる
+	bcs.s	DF_END
+	cmpi.w	#SECMAX,d4
+	bcc.s	DF_END
+	move.l	a0,(a3)+
+	move.b	(a1)+,(a0)+			* C
+	move.b	(a1)+,(a0)+			* H
+	move.b	(a1)+,(a0)+			* R
+	move.b	(a1)+,(a0)+			* N
+	clr.w	(a0)+				* セクタ数 (あとで入れる)
+	move.b	d3,(a0)+			* 密度
+	move.b	d1,(a0)+			* 削除フラグ
+	clr.l	(a0)+				* ステータス
+	clr.w	(a0)+
+	move.b	d2,(a0)+			* データの大きさ (LE)
+	ror.w	#8,d2
+	move.b	d2,(a0)+
+	ror.w	#8,d2
+	subq.w	#1,d2
+DF_CP:	move.b	(a2)+,(a0)+
+	dbf	d2,DF_CP
+	addq.w	#1,d4
+	bra	DF_ID
+
+DF_END:	tst.w	d4				* ＩＤがひとつもない
+	beq	DF_NG
+	lea	TC_SEC,a3
+	move.w	d4,d0
+	subq.w	#1,d0
+DF_NS:	movea.l	(a3)+,a1
+	move.b	d4,SH_NSEC(a1)
+	dbf	d0,DF_NS
+	move.w	d4,TC_NSEC
+	move.l	a0,TC_END
+	move.l	a0,d3
+	subi.l	#TRKBUF,d3			* d3 = 新しいトラックの大きさ
+
+	tst.w	d7
+	bmi	DF_NG
+	bsr	D8_TBLADR			* a3 = トラックオフセットテーブル
+	bsr	D8_TBLN
+	cmp.w	d0,d5
+	bcc	DF_NG
+	move.w	d0,FM_TBN
+	lea	D88SIZ,a4
+	adda.w	d6,a4				* a4 = ディスクの大きさ
+	move.w	d5,d0
+	lsl.w	#2,d0
+	lea	(a3,d0.w),a2			* a2 = このトラックのオフセット
+	move.l	(a2),d4				* d4 = トラックの位置
+	bne.s	DF_1
+	move.l	(a4),d4				* ないトラックはディスクの終わりに置く
+DF_1:	move.l	(a4),d1				* d1 = 次のトラックの位置
+	movea.l	a3,a1
+	move.w	#TBLMAX-1,d0
+DF_2:	move.l	(a1)+,d2
+	cmp.l	d4,d2
+	bls.s	DF_3
+	cmp.l	d1,d2
+	bcc.s	DF_3
+	move.l	d2,d1
+DF_3:	dbf	d0,DF_2
+	move.l	d1,FM_LO
+	move.l	d4,d2
+	add.l	d3,d2
+	sub.l	d1,d2				* d2 = 大きさの差
+	move.l	d2,FM_DLT
+	beq	DF_WR
+
+	move.w	#2,-(sp)			* MODE = 2 (終わりからのOFFSET)
+	clr.l	-(sp)
+	move.w	d7,-(sp)
+	dc.w	$FF42						* DOS _SEEK
+	addq.l	#8,sp
+	move.l	d0,FM_HI			* ファイルの大きさ
+	bmi	DF_NG
+	cmp.l	d1,d0
+	bcs	DF_NG
+	tst.l	d2
+	bmi.s	DF_MV
+	lea	TRKBUF,a0			* 先にファイルを伸ばす (ディスクフルならやめる)
+	move.l	d0,d1
+	bsr	D8_FWRITE
+	beq.s	DF_MV
+	moveq	#0,d2				* 伸ばした分を捨てる
+	bsr	D8_FWRITE
+	bra	DF_NG
+DF_MV:	bsr	DF_MOVE
+	bne	DF_NG
+	move.l	FM_DLT,d2
+	movea.l	a3,a1				* 後ろのトラックのオフセットを直す
+	move.w	#TBLMAX-1,d0
+DF_4:	cmp.l	(a1),d4
+	bcc.s	DF_5
+	add.l	d2,(a1)
+DF_5:	addq.l	#4,a1
+	dbf	d0,DF_4
+	add.l	d2,(a4)
+	tst.l	d2
+	bpl.s	DF_WR
+	move.l	FM_HI,d1			* 縮んだ分を捨てる
+	add.l	d2,d1
+	moveq	#0,d2
+	bsr	D8_FWRITE
+	bne.s	DF_NG
+
+DF_WR:	move.l	d4,(a2)
+	lea	TRKBUF,a0
+	move.l	d4,d1
+	move.l	d3,d2
+	bsr	D8_FWRITE
+	bne.s	DF_NG
+	lea	HDRBUF,a0			* ディスクの大きさとテーブルを書く
+	move.l	(a4),d0
+	bsr	D8_PUTLE
+	movea.l	a3,a1
+	move.w	FM_TBN,d1
+	subq.w	#1,d1
+DF_6:	move.l	(a1)+,d0
+	bsr	D8_PUTLE
+	dbf	d1,DF_6
+	move.l	a0,d2
+	lea	HDRBUF,a0
+	sub.l	a0,d2
+	moveq	#$1C,d1
+	bsr	D8_FWRITE
+	bne.s	DF_NG
+	move.l	d4,TC_OFS			* 作ったトラックをバッファのトラックにする
+	move.w	d5,TC_TRK
+	move.w	d6,TC_DRV
+	moveq	#%00000000,d2
+	bra.s	DF_RT
+DF_NG:	moveq	#%00100000,d2			* Write Fault
+DF_RT:	movem.l	(sp)+,d3-d7/a0-a4
+	rts
+
+
+*	ファイルの FM_LO から FM_HI までを、FM_DLT だけずらす
+*	(B_DISK を作業用に使う)
+*	in	d7.w = ファイルハンドル
+*	out	d0.l = 0 / -1 (できない)		(d1,d2,a0 破壊)
+
+DF_MOVE:
+	movem.l	d3-d4,-(sp)
+	move.l	FM_HI,d4
+	sub.l	FM_LO,d4			* d4 = 残りのバイト数
+	bls.s	DM_OK
+	move.l	FM_LO,d3			* d3 = 位置 (前へずらすときは先頭から)
+	tst.l	FM_DLT
+	bmi.s	DM_1
+	move.l	FM_HI,d3			* 後ろへずらすときは終わりから
+DM_1:	move.l	#BUFSIZ,d2
+	cmp.l	d4,d2
+	bls.s	DM_2
+	move.l	d4,d2				* d2 = 今回のバイト数
+DM_2:	tst.l	FM_DLT
+	bmi.s	DM_3
+	sub.l	d2,d3
+DM_3:	lea	B_DISK,a0
+	move.l	d3,d1
+	bsr	D8_FREAD
+	bne.s	DM_NG
+	move.l	d3,d1
+	add.l	FM_DLT,d1
+	bsr	D8_FWRITE
+	bne.s	DM_NG
+	tst.l	FM_DLT
+	bpl.s	DM_4
+	add.l	d2,d3
+DM_4:	sub.l	d2,d4
+	bne.s	DM_1
+DM_OK:	movem.l	(sp)+,d3-d4
+	moveq	#0,d0
+	rts
+DM_NG:	movem.l	(sp)+,d3-d4
+	moveq	#-1,d0
 	rts
 
 
@@ -923,6 +1192,11 @@ TC_OFS:	ds.l	1			* トラックのファイル内の位置
 TC_END:	ds.l	1			* バッファ内のトラックの終わり
 TC_SEC:	ds.l	SECMAX			* セクタヘッダのアドレス
 
+D88SIZ:	ds.l	4			* ドライブごとのディスクの大きさ
+FM_LO:	ds.l	1			* フォーマットでずらす範囲の先頭
+FM_HI:	ds.l	1			* その終わり (ファイルの大きさ)
+FM_DLT:	ds.l	1			* ずらすバイト数
+FM_TBN:	ds.w	1			* ファイル上のテーブルの個数
 D88TBL:	ds.l	TBLMAX*4		* トラックオフセットテーブル (ドライブごと)
 HDRBUF:	ds.b	HDRSIZ
 TRKBUF:	ds.b	TRKSIZ

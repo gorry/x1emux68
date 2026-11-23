@@ -1,8 +1,15 @@
 AS = has.x
 LD = hlk.x
 
+ASFLAGS = -w -o $@ $<
+
+ASM = $(AS) $(ASFLAGS)
+
 SRCDIR = src
 OBJDIR = obj
+PKGDIR = package
+
+.PHONY: x clean arc
 
 x	:	X1.x X1DB.x
 
@@ -13,51 +20,57 @@ X1DB.x		:	$(OBJDIR)/X1STAT.o $(OBJDIR)/Z80DB.o $(OBJDIR)/Z80DIS.o $(OBJDIR)/X1EM
 	$(LD) $^ -o $@ > err.err
 
 $(OBJDIR)/X1EMU.o		:	$(SRCDIR)/X1EMU.has
-	$(AS) -w $^ -s Z80DEBUG=0 -o $@ > err.err
+	$(ASM) -s Z80DEBUG=0 > err.err
 
 $(OBJDIR)/X1EMUDB.o	:	$(SRCDIR)/X1EMU.has
-	$(AS) -w $^ -s Z80DEBUG=1 -o $@ > err.err
+	$(ASM) -s Z80DEBUG=1 > err.err
 
 $(OBJDIR)/Z801.o		:	$(SRCDIR)/Z80.has
-	$(AS) -w $^ -s F_ROM=0 -s Z80DEBUG=0 -o $@ > err.err
+	$(ASM) -s F_ROM=0 -s Z80DEBUG=0 > err.err
 
 $(OBJDIR)/Z802.o		:	$(SRCDIR)/Z80.has
-	$(AS) -w $^ -s F_ROM=1 -s Z80DEBUG=0 -o $@ > err.err
+	$(ASM) -s F_ROM=1 -s Z80DEBUG=0 > err.err
 
 $(OBJDIR)/Z801_DB.o	:	$(SRCDIR)/Z80.has
-	$(AS) -w $^ -s F_ROM=0 -s Z80DEBUG=1 -o $@ > err.err
+	$(ASM) -s F_ROM=0 -s Z80DEBUG=1 > err.err
 
 $(OBJDIR)/Z802_DB.o	:	$(SRCDIR)/Z80.has
-	$(AS) -w $^ -s F_ROM=1 -s Z80DEBUG=1 -o $@ > err.err
+	$(ASM) -s F_ROM=1 -s Z80DEBUG=1 > err.err
 
 $(OBJDIR)/X1IO.o		:	$(SRCDIR)/X1IO.has
-	$(AS) -w $^ -o $@ > err.err
+	$(ASM) > err.err
 
 $(OBJDIR)/X1D88.o	:	$(SRCDIR)/X1D88.has
-	$(AS) -w $^ -o $@ > err.err
+	$(ASM) > err.err
 
 $(OBJDIR)/X1STAT.o	:	$(SRCDIR)/X1STAT.has
-	$(AS) -w $^ -o $@ > err.err
+	$(ASM) > err.err
 
 $(OBJDIR)/Z80DB.o		:	$(SRCDIR)/Z80DB.has
-	$(AS) -w $^ -s DUMMYDB=0 -o $@ > err.err
+	$(ASM) -s DUMMYDB=0 > err.err
 
 $(OBJDIR)/DMYZ80DB.o	:	$(SRCDIR)/Z80DB.has
-	$(AS) -w $^ -s DUMMYDB=1 -o $@ > err.err
+	$(ASM) -s DUMMYDB=1 > err.err
 
 $(OBJDIR)/Z80DIS.o	:	$(SRCDIR)/Z80DIS.has
-	$(AS) -w $^ -o $@ > err.err
+	$(ASM) > err.err
 
 clean:
-	-rm -f obj/*.o
-	-rm -f X1.x X1DB.x
+	-rm -f obj/*.o X1.x X1DB.x err.err
 
-arc	:	X1V100G4.zip
-X1V100G4.zip	:	X1.x X1DB.x CONFIG.X1 doc/X1.DOC doc/X1VG.DOC SRC.zip 2DTOOL.zip X1FILE.zip
-	zip $@ $^
+arc	:	$(PKGDIR)/X1EmuX68_202611231.lzh
 
-SRC.zip	:	Makefile $(SRCDIR)/X1EMU.has $(SRCDIR)/X1IO.has $(SRCDIR)/X1D88.has $(SRCDIR)/X1STAT.has $(SRCDIR)/Z80.has $(SRCDIR)/Z80DB.has $(SRCDIR)/Z80DIS.has \
-			z80/TEST.Z8D z80/TEST.Z80
-	zip $@ $^
+$(PKGDIR)/X1EmuX68_202611231.lzh	:	X1.x X1DB.x CONFIG.X1.sample README.txt NOTICE LICENSE doc/X1.DOC doc/X1VG.DOC 2DTOOL.LZH SRC.LZH
+	-rm $@
+	-mkdir $(PKGDIR)
+	lha a -x $@ $^
+	-rm README.txt
+
+README.txt	:	README.md
+	nkf -s -Lw $< > $@
+
+SRC.LZH : $(SRCDIR)/*.has z80/*.* Makefile
+	-rm $@
+	lha a -x $@ $^
 
 
